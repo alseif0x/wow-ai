@@ -533,12 +533,14 @@ function fromPath(p) {
 function unwrapShim(shim, agent) {
   let src;
   try { src = fs.readFileSync(shim, 'utf8'); } catch { return null; }
-  // npm shims also mention "%dp0%\node.exe"; the launcher is the .js one.
-  const m = [...src.matchAll(/"%~?dp0%?\\([^"]+)"/g)].find(x => /\.[cm]?js$/i.test(x[1]));
+  // npm shims mention "%dp0%\node.exe" before the launcher: skip it. The launcher
+  // is a .js file (Codex), a .exe (Claude) or a shebang script with no extension (Grok).
+  const m = [...src.matchAll(/"%~?dp0%?\\([^"]+)"/g)].find(x => !/(^|\\)node\.exe$/i.test(x[1]));
   if (!m) return null;
   const script = path.resolve(path.dirname(shim), m[1].split('\\').join(path.sep));
   if (!exists(script)) return null;
   for (const exe of nativeNextTo(script, agent)) if (exists(exe)) return { file: exe, args: [], found: true };
+  if (/\.exe$/i.test(script)) return { file: script, args: [], found: true };
   return { file: process.execPath, args: [script], found: true };
 }
 

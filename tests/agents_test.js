@@ -315,6 +315,28 @@ test('resolveCommand: a configured script runs with this node, an npm .cmd shim 
     const batShim = path.join(tmp, 'codex3.bat');
     fs.writeFileSync(batShim, '@node "%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n');
     assert.deepEqual(A.resolveCommand('codex', { path: batShim }), { file: process.execPath, args: [path.join(bin, 'codex.js')], found: true });
+    // Claude's npm package launches a .exe: run it directly.
+    const claudeExe = path.join(tmp, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+    fs.mkdirSync(path.dirname(claudeExe), { recursive: true });
+    fs.writeFileSync(claudeExe, '');
+    const claudeShim = path.join(tmp, 'claude.cmd');
+    fs.writeFileSync(claudeShim, 'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n)\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe" %*\r\n');
+    assert.deepEqual(A.unwrapShim(claudeShim, A.AGENTS.claude), { file: claudeExe, args: [], found: true });
+    // Grok's launcher has no extension: the native exe next to it when present, else this node runs the script.
+    const grokScript = path.join(tmp, 'node_modules', '@xai-official', 'grok', 'bin', 'grok');
+    fs.mkdirSync(path.dirname(grokScript), { recursive: true });
+    fs.writeFileSync(grokScript, '#!/usr/bin/env node\n');
+    const grokShim = path.join(tmp, 'grok.cmd');
+    fs.writeFileSync(grokShim, 'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n)\r\n"%_prog%"  "%dp0%\\node_modules\\@xai-official\\grok\\bin\\grok" %*\r\n');
+    assert.deepEqual(A.unwrapShim(grokShim, A.AGENTS.grok), { file: process.execPath, args: [grokScript], found: true });
+    const grokExe = path.join(tmp, 'node_modules', '@xai-official', `grok-win32-${process.arch === 'arm64' ? 'arm64' : 'x64'}`, 'bin', 'grok.exe');
+    fs.mkdirSync(path.dirname(grokExe), { recursive: true });
+    fs.writeFileSync(grokExe, '');
+    assert.deepEqual(A.unwrapShim(grokShim, A.AGENTS.grok), { file: grokExe, args: [], found: true });
+    // A shim that only mentions node.exe unwraps to nothing.
+    const nodeOnly = path.join(tmp, 'odd.cmd');
+    fs.writeFileSync(nodeOnly, '"%dp0%\\node.exe" %*\r\n');
+    assert.equal(A.unwrapShim(nodeOnly, A.AGENTS.codex), null);
     const oldPath = process.env.CODEX_BIN;
     try {
       process.env.CODEX_BIN = path.join(tmp, 'codex.exe');
