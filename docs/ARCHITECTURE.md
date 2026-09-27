@@ -127,4 +127,4 @@ The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/relo
 - A raised signal file stays "valid" in the client until a full restart, so slot numbers that wrap around (every 200 messages) lose the cheap signals until then. Self-detected.
 - Message capacity ≈ 3.2 KB per send; longer text is refused with a hint.
 - Replies are published in full (a ~3 KB message can produce a 60 KB reply; that is fine for a slot file). The bridge-side transcript keeps the first 4000 characters of each message, and a restore sends back the last 40 messages per chat at 2000 characters each.
-- Windows, or Linux with the game under Wine on X11 (see [INSTALL-LINUX.md](INSTALL-LINUX.md)). macOS is untested.
+- Windows, Linux with the game under Wine on X11 (see [INSTALL-LINUX.md](INSTALL-LINUX.md)), or macOS with a native client (README, "macOS (native client)"; contributed and tested live by its author).
