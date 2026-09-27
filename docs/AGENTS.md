@@ -10,7 +10,7 @@ The bridge can drive three coding agents: Claude Code, OpenAI Codex and xAI's Gr
 - A session belongs to the agent (and the folder) that made it. A chat that changes agent starts a fresh session with the new one; the transcript in the window stays.
 - The bridge's banner lists every agent with the executable it found, or what to install. A chat whose agent is missing gets a reply saying so instead of a hang.
 
-All three run headless on the bridge PC, so log in once by hand in a terminal there (`claude`, `codex`, `grok login`); the bridge reuses the cached login.
+All of them run headless on the bridge PC, so log in once by hand in a terminal there (`claude`, `codex`, `grok login`, `agy`, `hermes setup`); the bridge reuses the cached login.
 
 ## The shared vocabulary
 
@@ -76,6 +76,7 @@ Codex also checks `CODEX_BIN` before searching `PATH`, so a newer launcher can o
 - The **Allow** button needs the agent to report what it refused. Claude always does; Grok marks the refused call `failed` with a "was not executed" line, which the bridge reads; Codex says it in its own words and has no rule to add anyway.
 - The bridge's own transcript (`bridge/transcripts.json`) and the addon's history record which agent wrote each reply, so a restored chat keeps its labels. Chats saved before agents existed show their replies as Claude's.
 - Codex and Grok were tested live against codex 0.156.1 and Grok Build 1.0.41 (the inject test, plus captured streams in `tests/agents_test.js`). Unknown event types are ignored; a stream that ends without a result is reported as an error with the exit code and the tail of stderr.
+- Antigravity and Hermes were contributed with captured streams in the tests and a live check by their author on Windows; the maintainer has not run them. Hermes gives no live progress (its reply is read when the process ends) and its permission mode is always the default: the bridge never passes it `--yolo`.
 
 ## Trying one without the game
 

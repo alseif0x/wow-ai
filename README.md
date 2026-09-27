@@ -4,7 +4,7 @@
   <img src="docs/screenshot.jpg" alt="The WoW AI chat window open in Goldshire, with a message on its way to a coding agent" width="900">
 </p>
 
-Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex) and [xAI's Grok Build](https://docs.x.ai/build/overview). Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
+Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex), [xAI's Grok Build](https://docs.x.ai/build/overview), Google's Antigravity CLI and Hermes Agent. Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
 
 - Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent and its folder
 - Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
@@ -12,6 +12,7 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - The agent knows your character, level, zone, talents, professions and quest log (optional), and you can shift-click items, spells and quests into a message
 - The agent can draw on your world map: numbered routes, quest stops and marks, with a navigator arrow that walks you from stop to stop
 - Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
+- Ready-made macros: ask for one and the reply carries a **Create macro** button that saves it and puts it on your cursor, ready to drop on an action bar (`/wow-ai macro undo` reverts it)
 - An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
 - A status light for the bridge, automatic retries, and recovery of your chats (and map layers) if the beta client wipes addon data
 - Runs on Windows, on Linux with the game under Wine, and on macOS with a native client
@@ -45,6 +46,8 @@ The bridge drives whichever of these you have installed; each chat can use a dif
   - [Claude Code](https://claude.com/claude-code): `claude --version` works
   - [Codex](https://developers.openai.com/codex): `npm install -g @openai/codex`, then `codex` once to log in
   - [Grok Build](https://docs.x.ai/build/overview): `irm https://x.ai/cli/install.ps1 | iex`, then `grok login`
+  - Antigravity (`agy`): install Google's Antigravity CLI, then run `agy` once to log in
+  - Hermes Agent (`hermes`): install it, then run `hermes setup` once
 
 ## Install
 
