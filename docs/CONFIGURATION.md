@@ -51,14 +51,14 @@ Keys under `capture`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Run `capture.ps1` (Windows) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-ai mode reload` in game). |
-| `processName` | `"WowB"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder. |
+| `enabled` | `true` | Run `capture.ps1` (Windows), `capture_mac.py` (macOS) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-ai mode reload` in game). |
+| `processName` | `"WowB"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder (on macOS, from the binary inside the `.app` bundle). |
 | `cellPx` | `4` | Pixel size of one strip cell. Must match `CELL` in `addon/WoWAI/Codec.lua`. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
 | `maxRows` | `48` | Maximum strip rows captured. Must match the addon. |
 | `intervalMs` | `250` | Capture period. Lower is more responsive and costs a little more CPU. |
-| `python` | `"python3"` | Linux: interpreter for `capture_x11.py`. |
-| `windowName` | `""` | Linux: find the game window by title substring instead of by WM_CLASS (`<processName>.exe`). |
+| `python` | `"python3"` | Linux and macOS: interpreter for `capture_x11.py` / `capture_mac.py`. |
+| `windowName` | `""` | Linux and macOS: find the game window by title substring instead of by process name (on Linux, by WM_CLASS `<processName>.exe`). |
 | `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
 
 The capture region is `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default) at the top-left of the game's client area.

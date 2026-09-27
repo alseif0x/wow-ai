@@ -1,5 +1,7 @@
-// Round-trip test: the addon's real Codec.lua (run in a Lua VM) -> PNG -> capture.ps1 decoder.
-// capture.ps1 on Windows, capture_x11.py elsewhere. Simulates game rendering with noise and gamma.
+// Round-trip test: the addon's real Codec.lua (run in a Lua VM) -> PNG -> the capture decoders.
+// capture.ps1 on Windows; elsewhere both Python decoders (capture_x11.py for Linux,
+// capture_mac.py for macOS: their --test-image mode needs only the stdlib). Simulates game
+// rendering with noise and gamma.
 'use strict';
 const fengari = require('fengari');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
@@ -15,6 +17,7 @@ if (process.platform !== 'win32') {
 const CODEC = path.join(__dirname, '..', 'addon', 'WoWAI', 'Codec.lua');
 const CAPTURE = path.join(__dirname, '..', 'bridge', 'capture.ps1');
 const CAPTURE_X11 = path.join(__dirname, '..', 'bridge', 'capture_x11.py');
+const CAPTURE_MAC = path.join(__dirname, '..', 'bridge', 'capture_mac.py');
 const TMP = path.join(__dirname, 'tmp');
 const CELL = 4, CELLS = 200, MAXROWS = 48;
 fs.mkdirSync(TMP, { recursive: true });
@@ -76,11 +79,14 @@ function render(cells, jitter, gamma) {
   return png(W, H, rgb);
 }
 
+// [name, decoded JSON] per decoder that runs on this platform.
 function decode(file) {
-  const out = process.platform === 'win32'
-    ? execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPTURE, '-TestImage', file], { encoding: 'utf8' })
-    : execFileSync('python3', [CAPTURE_X11, '--test-image', file], { encoding: 'utf8' });
-  return JSON.parse(out.trim().split('\n').pop());
+  const last = out => JSON.parse(out.trim().split('\n').pop());
+  if (process.platform === 'win32') {
+    return [['capture.ps1', last(execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPTURE, '-TestImage', file], { encoding: 'utf8' }))]];
+  }
+  return [['capture_x11.py', CAPTURE_X11], ['capture_mac.py', CAPTURE_MAC]]
+    .map(([name, script]) => [name, last(execFileSync('python3', [script, '--test-image', file], { encoding: 'utf8' }))]);
 }
 
 const cases = [
@@ -90,15 +96,17 @@ const cases = [
   { id: 65000, payload: '\x1F\x1F\x1F\x1F\x1F\x1Fx', jitter: 120, gamma: 1 },
 ];
 
-let pass = 0;
+let pass = 0, total = 0;
 for (const t of cases) {
   const cells = encodeWithLua(t.id, t.payload);
   const file = path.join(TMP, `strip_${t.id}.png`);
   fs.writeFileSync(file, render(cells, t.jitter, t.gamma));
-  const res = decode(file);
-  const ok = res.id === t.id && res.text === t.payload;
-  if (ok) pass++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  id=${t.id}  bytes=${Buffer.byteLength(t.payload)}  cells=${cells.length}  rows=${Math.ceil(cells.length / CELLS)}  noise=±${t.jitter} gamma=${t.gamma}` + (ok ? '' : `\n   got ${JSON.stringify(res).slice(0, 200)}`));
+  for (const [name, res] of decode(file)) {
+    total++;
+    const ok = res.id === t.id && res.text === t.payload;
+    if (ok) pass++;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  id=${t.id}  bytes=${Buffer.byteLength(t.payload)}  cells=${cells.length}  rows=${Math.ceil(cells.length / CELLS)}  noise=±${t.jitter} gamma=${t.gamma}` + (ok ? '' : `\n   got ${JSON.stringify(res).slice(0, 200)}`));
+  }
 }
-console.log(pass === cases.length ? '>>> CODEC ROUND-TRIP PASS' : '>>> CODEC ROUND-TRIP FAIL');
-process.exit(pass === cases.length ? 0 : 1);
+console.log(pass === total ? '>>> CODEC ROUND-TRIP PASS' : '>>> CODEC ROUND-TRIP FAIL');
+process.exit(pass === total ? 0 : 1);
