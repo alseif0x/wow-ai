@@ -497,7 +497,6 @@ const SILENT_WAV = (() => {
 // replaced by a readable plain-text version, since the window doesn't render markdown.
 
 const MACRO_LIMITS = { name: 16, body: 255, perReply: 6 };
-const MACRO_DEFAULT_ICON = 134400; // the question mark: with #showtooltip the game shows the spell's icon
 const MACRO_RE = /```wowmacro([^\n]*)\n([\s\S]*?)```/g;
 const RISKY_MACRO_RE = /^\s*\/(run|script|click|console|dump)\b/im;
 
@@ -554,5 +553,5 @@ module.exports = {
   ruleFor, describeToolUse,
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
-  MACRO_LIMITS, MACRO_DEFAULT_ICON, extractMacros, stripMacroBlocks, luaMacros,
+  MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
 };

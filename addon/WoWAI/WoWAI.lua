@@ -1676,7 +1676,7 @@ end
 
 function WoWAI.MacroLabel(m)
 	local verb = FindMacro(m.name, m.char) and "Update" or "Create"
-	return verb .. " macro: " .. m.name .. (m.char and " (character)" or "") .. (m.risky and "  |cffff6060(runs code)|r" or "")
+	return verb .. " macro: " .. Display(m.name) .. (m.char and " (character)" or "") .. (m.risky and "  |cffff6060(runs code)|r" or "")
 end
 
 StaticPopupDialogs["WOWAI_MACRO"] = {
@@ -1705,7 +1705,7 @@ function WoWAI.InstallMacro(m, confirmed)
 		if m.risky then table.insert(why, "This macro runs code or clicks buttons (/run, /script, /click). Only keep it if you trust what it does.") end
 		if index and oldBody ~= m.body then table.insert(why, "It replaces your existing macro \"" .. m.name .. "\" (/wow-ai macro undo brings the old one back).") end
 		if #why > 0 then
-			StaticPopup_Show("WOWAI_MACRO", table.concat(why, "\n\n") .. "\n\n" .. m.body, nil, m)
+			StaticPopup_Show("WOWAI_MACRO", table.concat(why, "\n\n") .. "\n\n" .. Display(m.body), nil, m)
 			return
 		end
 	end
@@ -1740,7 +1740,7 @@ function WoWAI.InstallMacro(m, confirmed)
 		end
 	end
 	if not ok or type(newIndex) ~= "number" then
-		MacroSay("could not save macro \"" .. m.name .. "\": " .. tostring(newIndex))
+		MacroSay("could not save macro \"" .. m.name .. "\": " .. (ok and "the game refused it (is the list full?)" or tostring(newIndex)))
 		return
 	end
 	-- EditMacro may move the macro (names are sorted): pick up the index it returned.
@@ -1944,8 +1944,8 @@ function WoWAI.Render()
 					mb:SetScript("OnClick", function(self) WoWAI.InstallMacro(self.macro) end)
 					mb:SetScript("OnEnter", function(self)
 						GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-						GameTooltip:AddLine(self.macro.name)
-						GameTooltip:AddLine(self.macro.body, 1, 1, 1, true)
+						GameTooltip:AddLine(Display(self.macro.name))
+						GameTooltip:AddLine(Display(self.macro.body), 1, 1, 1, true)
 						GameTooltip:Show()
 					end)
 					mb:SetScript("OnLeave", function() GameTooltip:Hide() end)

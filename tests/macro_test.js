@@ -253,3 +253,23 @@ test('malformed macro entries from a slot are dropped', () => {
   assert.deepEqual(buttons(vm), ['Create macro: Ok']);
   assert.equal(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].macros[1].icon'), null);
 });
+
+test('a macro the game refuses is reported and nothing is picked up', () => {
+  const vm = newVM();
+  vm.run('CreateMacro = function(name) table.insert(STUB.calls, "create " .. name) return nil end');
+  deliver(vm, '{ { name = "Nope", body = "/sit", char = false } }');
+  click(vm);
+  assert.equal(vm.evaluate('table.concat(STUB.calls, ",")'), 'create Nope');
+  assert.equal(vm.evaluate('STUB.picked'), null);
+  assert.match(vm.evaluate('STUB.prints[#STUB.prints]'), /could not save macro "Nope": the game refused it/);
+});
+
+test('macro text in the confirm popup has its pipes made harmless', () => {
+  const vm = newVM();
+  vm.run('local orig = StaticPopup_Show; StaticPopup_Show = function(w, a, b, d) STUB.popupText = a; orig(w, a, b, d) end');
+  deliver(vm, '{ { name = "Pipe", body = "/run print(\\"|cffff0000x|r\\")", char = false, risky = true } }');
+  click(vm);
+  assert.equal(vm.evaluate('STUB.popup.which'), 'WOWAI_MACRO');
+  assert.ok(vm.evaluate('STUB.popupText').includes('/run print("¦cffff0000x¦r")'));
+  assert.ok(!vm.evaluate('STUB.popupText').includes('|'));
+});
