@@ -42,7 +42,7 @@ const DEFAULTS = {
   speak: 'voice',    // read replies aloud: "voice" (replies to voice messages), "always", "off"
   speakMaxChars: 400,
   beeps: true,
-  // Exists while the bridge is recording, so wow-voz (the voice-order module)
+  // Exists while the bridge is recording, so wow-voice (the voice-order module)
   // knows that phrase is for the AI, not an order for the character.
   listeningFile: path.join(os.homedir(), '.cache', 'wow-ai', 'listening'),
   prompt: 'World of Warcraft. Bolsas, banco, chatarra, misión, misiones, Ventormenta, Forjaz, Orgrimmar, ' +

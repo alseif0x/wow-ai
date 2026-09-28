@@ -564,15 +564,15 @@ async function listenFor(job) {
     finish(job, 'error', 'The bridge is already listening for another message. Try again in a moment.');
     return false;
   }
-  // wow-voz (the voice-order module) heard "oye IA, ..." and pressed Talk for it:
+  // wow-voice (the voice-order module) heard "oye IA, ..." and pressed Talk for it:
   // the phrase is already said, so take its audio instead of recording.
   const handed = takeHandoff();
   if (handed) {
     publish(key, { chat: job.chat, id: job.id, status: 'working', text: 'Transcribiendo...', cwd: job.cwd }, true);
     let text = '';
-    try { text = (await voice.transcribe(handed.pcm)).text; } catch (e) { log(`${tag} voice (wow-voz): ${e.message}`); }
+    try { text = (await voice.transcribe(handed.pcm)).text; } catch (e) { log(`${tag} voice (wow-voice): ${e.message}`); }
     text = stripWake(text) || stripWake(handed.text);
-    log(`${tag} voice (from wow-voz): "${text.slice(0, 120)}"`);
+    log(`${tag} voice (from wow-voice): "${text.slice(0, 120)}"`);
     if (!text) { finish(job, 'error', 'No te he entendido. Repite la pregunta.'); return false; }
     job.heard = text;
     job.text = job.text ? `${job.text}\n${text}` : text;
@@ -600,7 +600,7 @@ async function listenFor(job) {
   return true;
 }
 
-// wow-voz leaves a phrase for us (~/.cache/wow-ai/voice-in.wav + .json) and
+// wow-voice leaves a phrase for us (~/.cache/wow-ai/voice-in.wav + .json) and
 // presses Talk right after. Taken once, and only while fresh.
 const HANDOFF = path.join(require('os').homedir(), '.cache', 'wow-ai', 'voice-in.wav');
 function takeHandoff() {
