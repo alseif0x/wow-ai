@@ -615,7 +615,8 @@ function takeHandoff() {
 
 // "Oye IA, ¿qué misión hago?" -> "¿qué misión hago?"
 function stripWake(text) {
-  return String(text || '').replace(/^\s*(?:(?:oye|eh|hey|ey|oiga|pregúntale a la|pregunta a la|dile a la)[\s,]+)?(?:ia|i\.\s?a\.?|la ia|inteligencia artificial|asistente)\b[\s,.:;!¡¿-]*/i, '').trim();
+  // Spanish ("oye IA, ...") and English ("hey AI, ...") wake words.
+  return String(text || '').replace(/^\s*(?:(?:oye|eh|hey|ey|oiga|pregúntale a la|pregunta a la|dile a la|ok|okay|yo|ask the|ask)[\s,]+)?(?:ia|i\.\s?a\.?|la ia|inteligencia artificial|asistente|ai|a\.?\s?i\.?|the ai|assistant)\b[\s,.:;!¡¿?-]*/i, '').trim();
 }
 
 // Before an agent run, one JEV request per message (jev.js, analyze): a quick
