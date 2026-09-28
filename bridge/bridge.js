@@ -564,6 +564,20 @@ async function listenFor(job) {
     finish(job, 'error', 'The bridge is already listening for another message. Try again in a moment.');
     return false;
   }
+  // wow-voz (the voice-order module) heard "oye IA, ..." and pressed Talk for it:
+  // the phrase is already said, so take its audio instead of recording.
+  const handed = takeHandoff();
+  if (handed) {
+    publish(key, { chat: job.chat, id: job.id, status: 'working', text: 'Transcribiendo...', cwd: job.cwd }, true);
+    let text = '';
+    try { text = (await voice.transcribe(handed.pcm)).text; } catch (e) { log(`${tag} voice (wow-voz): ${e.message}`); }
+    text = stripWake(text) || stripWake(handed.text);
+    log(`${tag} voice (from wow-voz): "${text.slice(0, 120)}"`);
+    if (!text) { finish(job, 'error', 'No te he entendido. Repite la pregunta.'); return false; }
+    job.heard = text;
+    job.text = job.text ? `${job.text}\n${text}` : text;
+    return true;
+  }
   publish(key, { chat: job.chat, id: job.id, status: 'working', text: 'Escuchando... (habla ahora)', cwd: job.cwd }, true);
   log(`${tag} voice: listening`);
   const rec = await voice.listen();
@@ -584,6 +598,24 @@ async function listenFor(job) {
   job.heard = t.text;
   job.text = job.text ? `${job.text}\n${t.text}` : t.text;
   return true;
+}
+
+// wow-voz leaves a phrase for us (~/.cache/wow-ai/voice-in.wav + .json) and
+// presses Talk right after. Taken once, and only while fresh.
+const HANDOFF = path.join(require('os').homedir(), '.cache', 'wow-ai', 'voice-in.wav');
+function takeHandoff() {
+  try {
+    const meta = JSON.parse(fs.readFileSync(HANDOFF + '.json', 'utf8'));
+    if (!meta || Date.now() / 1000 - Number(meta.t) > 20) return null;
+    const wav = fs.readFileSync(HANDOFF);
+    return { pcm: wav.subarray(44), text: String(meta.text || '') };
+  } catch { return null; }
+  finally { try { fs.rmSync(HANDOFF + '.json', { force: true }); fs.rmSync(HANDOFF, { force: true }); } catch {} }
+}
+
+// "Oye IA, ¿qué misión hago?" -> "¿qué misión hago?"
+function stripWake(text) {
+  return String(text || '').replace(/^\s*(?:(?:oye|eh|hey|ey|oiga|pregúntale a la|pregunta a la|dile a la)[\s,]+)?(?:ia|i\.\s?a\.?|la ia|inteligencia artificial|asistente)\b[\s,.:;!¡¿-]*/i, '').trim();
 }
 
 // Before an agent run, one JEV request per message (jev.js, analyze): a quick
