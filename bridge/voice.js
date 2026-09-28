@@ -42,6 +42,9 @@ const DEFAULTS = {
   speak: 'voice',    // read replies aloud: "voice" (replies to voice messages), "always", "off"
   speakMaxChars: 400,
   beeps: true,
+  // Exists while the bridge is recording, so wow-voz (the voice-order module)
+  // knows that phrase is for the AI, not an order for the character.
+  listeningFile: path.join(os.homedir(), '.cache', 'wow-ai', 'listening'),
   prompt: 'World of Warcraft. Bolsas, banco, chatarra, misión, misiones, Ventormenta, Forjaz, Orgrimmar, ' +
     'instructor, talentos, hechizos, macro, mazmorra, banda, oro, plata, cobre.',
 };
@@ -52,6 +55,7 @@ function settings(cfg) {
   const o = { ...DEFAULTS, ...((cfg && cfg.voice) || {}) };
   o.python = home(o.python);
   o.piperVoice = home(o.piperVoice);
+  o.listeningFile = home(o.listeningFile);
   return o;
 }
 
@@ -243,11 +247,19 @@ class Voice {
   listen() {
     if (this.recording) return Promise.reject(new Error('already listening'));
     const o = this.o;
+    const flag = (on) => {
+      if (!o.listeningFile) return;
+      try {
+        if (on) { fs.mkdirSync(path.dirname(o.listeningFile), { recursive: true }); fs.writeFileSync(o.listeningFile, String(process.pid)); }
+        else fs.rmSync(o.listeningFile, { force: true });
+      } catch {}
+    };
+    flag(true);
     return new Promise((resolve, reject) => {
       if (this.beeps.start) play(o, this.beeps.start);
       let child;
       try { child = spawn(o.recordCommand[0], o.recordCommand.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] }); }
-      catch (e) { reject(e); return; }
+      catch (e) { flag(false); reject(e); return; }
       const chunks = [];
       const vad = makeVad(o);
       let finished = false, stderr = '';
@@ -255,6 +267,7 @@ class Voice {
         if (finished) return;
         finished = true;
         this.recording = null;
+        flag(false);
         try { child.kill(); } catch {}
         if (this.beeps.stop) play(o, this.beeps.stop);
         resolve({ pcm: Buffer.concat(chunks), reason, heard: vad.heard, peak: vad.peak, ms: vad.elapsed });
@@ -268,11 +281,11 @@ class Voice {
       child.stderr.on('data', (d) => { stderr = (stderr + d).slice(-500); });
       child.on('error', (e) => {
         if (finished) return;
-        finished = true; this.recording = null;
+        finished = true; this.recording = null; flag(false);
         reject(new Error(`cannot record with ${o.recordCommand[0]}: ${e.message}`));
       });
       child.on('close', (code) => {
-        if (!finished && code) { finished = true; this.recording = null; reject(new Error(`${o.recordCommand[0]} exited (${code}) ${stderr.trim()}`)); }
+        if (!finished && code) { finished = true; this.recording = null; flag(false); reject(new Error(`${o.recordCommand[0]} exited (${code}) ${stderr.trim()}`)); }
         else end('ended');
       });
     });
