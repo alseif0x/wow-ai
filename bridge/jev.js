@@ -287,6 +287,8 @@ function describeAction(a) {
     case 'create_macro': return `Create a macro named "${String(a.name || '').slice(0, 16)}".`;
     case 'learn_talents': return 'Spend talent points.';
     case 'train_all': return 'Learn everything the trainer offers.';
+    case 'arrange_bags': return `Rearrange the bags, putting ${n(a.order)} kind(s) of item first.`;
+    case 'move_items': return `Move ${n(a.moves)} item(s) to other bag slots.`;
     default: return `Do "${String(a && a.op)}".`;
   }
 }
@@ -318,7 +320,26 @@ async function review(cfg, request, actions) {
   return { scores, ms: Math.max(0, ...results.map(r => r.ms || 0)), note: errors.length ? errors[0] : '' };
 }
 
+// How much an action can cost the player if it wasn't wanted: "high" ones (gold
+// spent, items sold, quests lost) need a surer answer before they run without
+// Apply than "low" ones (anything the player can put back by hand).
+const RISK = { sell_junk: 'high', sell_items: 'high', abandon_quests: 'high', learn_talents: 'high', train_all: 'high' };
+function risk(op) { return RISK[op] || 'low'; }
+
+// Run without the Apply click? Only when every action has an answer at or above
+// the threshold for its risk (scores[i] from review(), or the quick order's
+// confidence for all of them).
+function autoApply(cfg, actions, scores) {
+  if (!cfg || cfg.enabled === false || cfg.autoApply === false || !actions || !actions.length) return false;
+  const low = cfg.autoApplyLow ?? 0.85, high = cfg.autoApplyHigh ?? 0.95;
+  return actions.every((a, i) => {
+    const v = Array.isArray(scores) ? scores[i] : scores;
+    return typeof v === 'number' && v >= (risk(a.op) === 'high' ? high : low);
+  });
+}
+
 module.exports = {
+  RISK, risk, autoApply,
   DECISIONS_URL, MODEL, QUICK, NEEDS, DIFFICULTY, TIER_NAMES, DEFAULT_TIERS, DEFAULT_KEY_FILE,
   analyzeRequest, reviewRequest, describeAction, readChoice, readScore, readNoul, routable, playerRequest,
   apiKey, decide, analyze, review,

@@ -99,7 +99,10 @@
       "fast": "gpt-6-luna--fast",
       "balanced": "gpt-6-sol",
       "strong": "anthropic/claude-opus-5-5"
-    }
+    },
+    "autoApply": true,
+    "autoApplyLow": 0.85,
+    "autoApplyHigh": 0.95
   },
   "voice": {
     "enabled": true,

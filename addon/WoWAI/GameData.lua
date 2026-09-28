@@ -73,7 +73,8 @@ end
 M.ItemName = ItemName
 
 -- One line per distinct item: "6948 Hearthstone x1 q1 Miscellaneous v0s".
-local function ItemLines(containers)
+-- withSlots adds where its stacks are, "@0:1,1:4" (bag:slot), for move_items.
+local function ItemLines(containers, withSlots)
 	local byId, order, used, total = {}, {}, 0, 0
 	for _, bag in ipairs(containers) do
 		total = total + NumSlots(bag)
@@ -83,11 +84,12 @@ local function ItemLines(containers)
 		local id = s.info.itemID
 		local e = byId[id]
 		if not e then
-			e = { id = id, count = 0, quality = s.info.quality, bound = s.info.isBound, nosell = s.info.hasNoValue }
+			e = { id = id, count = 0, quality = s.info.quality, bound = s.info.isBound, nosell = s.info.hasNoValue, at = {} }
 			byId[id] = e
 			table.insert(order, e)
 		end
 		e.count = e.count + (s.info.stackCount or 1)
+		table.insert(e.at, s.bag .. ":" .. s.slot)
 	end
 	local lines = {}
 	for _, e in ipairs(order) do
@@ -99,14 +101,25 @@ local function ItemLines(containers)
 		if e.nosell then table.insert(parts, "nosell")
 		elseif type(price) == "number" and price > 0 then table.insert(parts, "v" .. math.floor(price / 100) .. "s") end
 		if e.bound then table.insert(parts, "bound") end
+		if withSlots and #e.at > 0 then
+			local shown = {}
+			for i = 1, math.min(#e.at, 6) do shown[i] = e.at[i] end
+			table.insert(parts, "@" .. table.concat(shown, ",") .. (#e.at > 6 and (",+" .. (#e.at - 6)) or ""))
+		end
 		table.insert(lines, table.concat(parts, " "))
 	end
 	return lines, total - used, total
 end
 
 local function BagsText()
-	local lines, free, total = ItemLines(BAGS)
-	return "## bags (" .. free .. " free of " .. total .. " slots; id name xcount quality type ilvl vendor-price)\n" .. table.concat(lines, "\n")
+	local lines, free, total = ItemLines(BAGS, true)
+	local sizes = {}
+	for _, bag in ipairs(BAGS) do
+		local n = NumSlots(bag)
+		if n > 0 then table.insert(sizes, bag .. "=" .. n) end
+	end
+	return "## bags (" .. free .. " free of " .. total .. " slots; bag sizes " .. table.concat(sizes, " ") .. "; 5 is the reagent bag;"
+		.. " id name xcount quality type ilvl vendor-price @bag:slot)\n" .. table.concat(lines, "\n")
 end
 
 local function SnapshotBank()

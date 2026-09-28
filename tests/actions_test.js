@@ -398,3 +398,110 @@ test('the queue holds ten messages and can be emptied', () => {
   vm.run('SlashCmdList.WOWAI("cola")');
   assert.ok(lastHistory(vm).startsWith('The queue is empty.'));
 });
+
+// ---------------------------------------------------------------------------
+// Moving items, and clear orders that run without Apply
+// ---------------------------------------------------------------------------
+
+// Picking up and putting down like the game: onto an empty slot it moves, onto a
+// taken one the two swap.
+const PICKUP_STUB = `
+C_Container.PickupContainerItem = function(bag, slot)
+  table.insert(CALLS, { "Pickup", bag, slot })
+  BAGS[bag] = BAGS[bag] or {}
+  local here = BAGS[bag][slot]
+  if HELD then
+    local h = HELD; HELD = nil
+    BAGS[bag][slot] = h.item
+    BAGS[h.bag][h.slot] = here
+  elseif here then
+    HELD = { item = here, bag = bag, slot = slot }
+  end
+end
+function CursorHasItem() return HELD ~= nil end
+`;
+const idAt = (vm, bag, slot) => vm.evaluate(`BAGS[${bag}] and BAGS[${bag}][${slot}] and BAGS[${bag}][${slot}].itemID`);
+
+test('bags game data says where each item is, and move_items / arrange_bags are validated', () => {
+  const vm = connected();
+  const sent = (() => { vm.run('WoWAI.SendGameData(WoWAIDB.chats[1].id, { "bags" })'); return Buffer.from(vm.evaluate('WoWAIDB.outbox.text'), 'hex').toString('utf8'); })();
+  assert.ok(sent.includes('2589 Linen Cloth x12 q1') && sent.includes('@0:1'), sent);
+  assert.ok(sent.includes('bag sizes 0=16'), sent);
+  const r = P.extractActionBlocks('```wowact\n' + JSON.stringify([
+    { op: 'arrange_bags', order: [3300, '6948', -2] },
+    { op: 'move_items', moves: [{ from: [0, 1], to: [1, 4] }, { from: { bag: 0, slot: 2 }, to: { bag: 0, slot: 2 } }, { from: [7, 1], to: [0, 1] }, { from: [0, 99], to: [0, 1] }] },
+    { op: 'move_items', moves: [] },
+  ]) + '\n```');
+  assert.deepEqual(r.actions, [
+    { op: 'arrange_bags', order: [3300, 6948] },
+    { op: 'move_items', moves: [{ from: [0, 1], to: [1, 4] }] },
+  ]);
+  assert.ok(r.errors.some(e => e.includes('bag 0-5, slot 1-40')));
+});
+
+test('move_items moves or swaps slots, arrange_bags lays the listed items out first', () => {
+  const vm = connected();
+  vm.run(PICKUP_STUB);
+  vm.run('BAGS[0][3] = { itemID = 6948, stackCount = 1, quality = 1 }; BAGS[0][5] = { itemID = 2589, stackCount = 3, quality = 1 }; ITEMS[6948] = "Hearthstone"');
+  exchange(vm, 'pon la tela al final', 'actions = { { op = "move_items", moves = { { from = { 0, 1 }, to = { 0, 10 } }, { from = { 0, 2 }, to = { 0, 3 } } } } }');
+  assert.ok(vm.evaluate('table.concat(STUB.texts, "\\n")').includes('Move in the bags (bag:slot): [Linen Cloth] 0:1 -> 0:10; [Rabbit\'s Foot] 0:2 -> 0:3'));
+  vm.run('WoWAI.ApplyActions()');
+  drain(vm);
+  assert.equal(idAt(vm, 0, 10), '2589', 'moved to the empty slot');
+  assert.equal(idAt(vm, 0, 1), null);
+  assert.equal(idAt(vm, 0, 3), '3300', 'swapped');
+  assert.equal(idAt(vm, 0, 2), '6948');
+  // Now: 2 Hearthstone, 3 Rabbit's Foot, 5 Linen, 10 Linen. Rabbit's Foot, then Hearthstone first; the cloth after, in order.
+  exchange(vm, 'ordénalas a mi manera', 'actions = { { op = "arrange_bags", order = { 3300, 6948 } } }');
+  vm.run('WoWAI.ApplyActions()');
+  drain(vm);
+  assert.deepEqual([1, 2, 3, 4, 5, 10].map(s => idAt(vm, 0, s)), ['3300', '6948', '2589', '2589', null, null]);
+  assert.match(lastHistory(vm), /OK {2}Arrange the bags, first: \[Rabbit's Foot\], \[Hearthstone\]/);
+});
+
+test('a clear order runs by itself; in combat it waits for the end, and a window order for the window', () => {
+  const vm = connected();
+  exchange(vm, 'ordena las bolsas', 'auto = true, actions = { { op = "sort_bags" } }');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBags'), 1, 'no Apply needed');
+  assert.match(lastHistory(vm), /^Done without asking \(a clear order\):\nOK {2}Sort your bags/);
+  // In combat: nothing yet, a note; it runs when combat ends.
+  vm.run('InCombatLockdown = function() return true end');
+  exchange(vm, 'ordena las bolsas', 'auto = true, actions = { { op = "sort_bags" } }');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBags'), 1);
+  assert.match(lastHistory(vm), /you are in combat/);
+  vm.run('InCombatLockdown = function() return false end; STUB.FireEvent("PLAYER_REGEN_ENABLED")');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBags'), 2);
+  // Sorting the bank waits for the bank, then runs on its own when it opens.
+  exchange(vm, 'ordena el banco', 'auto = true, actions = { { op = "sort_bank" } }');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBank'), 0);
+  vm.run('STUB.FireEvent("BANKFRAME_OPENED")');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBank'), 1);
+  // Without the flag, or with autoapply off, it waits for Apply as before.
+  exchange(vm, 'ordena', 'actions = { { op = "sort_bags" } }');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBags'), 2);
+  vm.run('SlashCmdList.WOWAI("discard")');
+  vm.run('SlashCmdList.WOWAI("autoaplicar off")');
+  exchange(vm, 'ordena', 'auto = true, actions = { { op = "sort_bags" } }');
+  drain(vm);
+  assert.equal(calls(vm, 'SortBags'), 2);
+});
+
+test('the bridge runs actions without Apply only above the threshold for their risk', () => {
+  const J = require('../bridge/jev');
+  assert.equal(J.autoApply({}, [{ op: 'sort_bags' }], 0.9), true);
+  assert.equal(J.autoApply({}, [{ op: 'sort_bags' }], 0.8), false);
+  assert.equal(J.autoApply({}, [{ op: 'sell_junk' }], 0.9), false, 'selling needs a surer answer');
+  assert.equal(J.autoApply({}, [{ op: 'sell_junk' }], 0.97), true);
+  assert.equal(J.autoApply({}, [{ op: 'sort_bags' }, { op: 'abandon_quests' }], [0.99, 0.9]), false, 'every action must pass');
+  assert.equal(J.autoApply({}, [{ op: 'sort_bags' }], [null]), false, 'no answer, no auto');
+  assert.equal(J.autoApply({ autoApply: false }, [{ op: 'sort_bags' }], 1), false);
+  assert.equal(J.describeAction({ op: 'move_items', moves: [{}, {}] }), 'Move 2 item(s) to other bag slots.');
+  const lua = P.luaTable('X', [{ chat: 'c', id: 1, status: 'done', text: 't', actions: [{ op: 'sort_bags' }], auto: true }]);
+  assert.match(lua, /auto = true,/);
+});

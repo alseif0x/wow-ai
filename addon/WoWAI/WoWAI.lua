@@ -223,6 +223,7 @@ local function InitDB()
 	if s.autoRefresh == nil then s.autoRefresh = true end
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
+	if s.autoApply == nil then s.autoApply = true end -- clear orders run without the Apply click
 	-- How much of each reply to print in the game chat. "summary" (the agent's
 	-- closing TL;DR lines) replaced "full" as the default; an install that still
 	-- has the old default saved moves over once, any other choice is kept.
@@ -777,7 +778,7 @@ local function ApplyReplies(replies)
 					C_Timer.After(0.2, function() WoWAI.SendGameData(c.id, need, true) end)
 				else
 					RunQuickCommands(r.cmds)
-					Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, actions, need, r.model)
+					Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, actions, need, r.model, r.auto and actions ~= nil)
 				end
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
@@ -988,8 +989,15 @@ local function SendNextQueued(chat)
 	WoWAI.Render()
 end
 
-Finish = function(chat, role, text, denied, agent, summary, actions, need, model)
+Finish = function(chat, role, text, denied, agent, summary, actions, need, model, auto)
 	AddHistory(chat, role, text, chat.pendingId, denied, agent, actions, model ~= "" and model or nil)
+	-- The bridge (JEV) judged these actions plainly asked for: apply them without
+	-- the click, unless the player turned that off (/wow-ai autoapply off).
+	if auto and actions and db.settings.autoApply ~= false then
+		chat.history[#chat.history].auto = true
+		local chatId = chat.id
+		C_Timer.After(0.4, function() WoWAI.ApplyActions(chatId, true) end)
+	end
 	chat.pendingId = nil
 	chat.progress = nil
 	if run.act then run.act[chat.id] = nil end
@@ -1555,19 +1563,36 @@ end
 -- The Apply button (and /wow-ai apply): run the actions, note how it went in the
 -- transcript and, with the next message, for the agent. Actions waiting for a
 -- window (bank, vendor, trainer) stay on the reply for another Apply.
-function WoWAI.ApplyActions(chatId)
+-- auto: applied without the click (a clear order, see Finish); in combat it
+-- waits for combat to end, and actions that need a window wait for it to open.
+function WoWAI.ApplyActions(chatId, auto)
 	local c = (chatId and FindChat(chatId)) or ActiveChat()
 	if not c or not WoWAIActions then return end
 	local m = PendingActions(c)
 	if not m then
-		AddHistory(c, "system", L("There are no proposed actions to apply.", "No hay acciones propuestas que aplicar."))
-		WoWAI.Render()
+		if not auto then
+			AddHistory(c, "system", L("There are no proposed actions to apply.", "No hay acciones propuestas que aplicar."))
+			WoWAI.Render()
+		end
+		return
+	end
+	if auto and InCombatLockdown() then
+		if not m.combatNoted then
+			m.combatNoted = true
+			AddHistory(c, "system", L("A clear order, but you are in combat: it runs when combat ends (or click Apply then).",
+				"Es una orden clara, pero estás en combate: se hará al salir del combate (o pulsa Aplicar entonces)."))
+			WoWAI.Render()
+		end
+		return
+	end
+	if auto and WoWAIActions.IsRunning() then
+		C_Timer.After(1, function() WoWAI.ApplyActions(chatId, true) end)
 		return
 	end
 	local ok, err = WoWAIActions.Run(m.actions, function(lines, pending)
 		m.actions = #pending > 0 and pending or nil
 		local text = table.concat(lines, "\n")
-		AddHistory(c, "system", L("Actions:\n", "Acciones:\n") .. text)
+		AddHistory(c, "system", (auto and L("Done without asking (a clear order):\n", "Hecho sin preguntar (era una orden clara):\n") or L("Actions:\n", "Acciones:\n")) .. text)
 		c.actionReport = "[actions] " .. (text:gsub("\n", "; "))
 		WoWAI.Render()
 		-- With nothing left to apply, a paused queue carries on (with the report).
@@ -1850,6 +1875,16 @@ function WoWAI.Chats() return db and db.chats or {} end
 function WoWAI.Frame() return ui.frame end
 function WoWAI.IsPending(c) c = c or ActiveChat() return c and c.pendingId ~= nil end
 function WoWAI.HasActions(c) c = c or ActiveChat() return c and PendingActions(c) ~= nil end
+-- Clear orders still waiting (for the end of combat, or a bank / vendor /
+-- trainer window): try them again now.
+function WoWAI.AutoApplyPending()
+	if not db or db.settings.autoApply == false then return end
+	for _, c in ipairs(db.chats) do
+		local m = PendingActions(c)
+		if m and m.auto and not c.pendingId then WoWAI.ApplyActions(c.id, true) end
+	end
+end
+
 function WoWAI.HasWarnedActions(c)
 	c = c or ActiveChat()
 	local m = c and PendingActions(c)
@@ -3128,6 +3163,7 @@ local HELP = table.concat({
 	"/wow-ai voice | voz            talk: the bridge listens on the PC's microphone and sends what you said (/wow-ai voice stop ends it early)",
 	"/wow-ai pad [on|off] | mando   gamepad mode: the controller drives this window (A talk, B back, X apply, Y menu, d-pad scroll and chats)",
 	"/wow-ai macros                 create the \"IA Voz\" and \"IA Mando\" macros, to put on a (gamepad) action bar",
+	"/wow-ai autoapply [on|off] | autoaplicar   clear orders run without the Apply click (on by default); off = every action waits for Apply",
 }, "\n")
 
 -- What each subcommand accepts, so that free text which happens to start with
@@ -3182,6 +3218,7 @@ local COMMAND_ARGS = {
 	voice = { [""] = true, stop = true }, voz = { [""] = true, stop = true, para = true },
 	pad = { [""] = true, on = true, off = true }, mando = { [""] = true, on = true, off = true },
 	macros = 0,
+	autoapply = { [""] = true, on = true, off = true }, autoaplicar = { [""] = true, on = true, off = true },
 }
 
 local function IsCommand(cmd, rest)
@@ -3426,6 +3463,15 @@ SlashCmdList["WOWAI"] = function(msg)
 		if WoWAIPad then
 			if rest == "on" then WoWAIPad.Enter() elseif rest == "off" then WoWAIPad.Exit() else WoWAIPad.Toggle() end
 		end
+	elseif cmd == "autoapply" or cmd == "autoaplicar" then
+		if rest == "on" then s.autoApply = true elseif rest == "off" then s.autoApply = false end
+		AddHistory(c, "system", s.autoApply
+			and L("Clear orders run by themselves (JEV checks each action against what you asked; anything doubtful still waits for Apply). /wow-ai autoapply off to always ask.",
+				"Las órdenes claras se hacen solas (JEV comprueba cada acción con lo que pediste; lo dudoso sigue esperando a Aplicar). /ai autoaplicar off para preguntar siempre.")
+			or L("Every proposed action waits for Apply. /wow-ai autoapply on to let clear orders run by themselves.",
+				"Todas las acciones esperan a Aplicar. /ai autoaplicar on para que las órdenes claras se hagan solas."))
+		WoWAI.Render()
+		WoWAI.Toggle(true)
 	elseif cmd == "macros" then
 		if WoWAIPad then WoWAIPad.MakeMacros() end
 	elseif cmd == "clear" then
@@ -3448,6 +3494,7 @@ ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 ev:RegisterEvent("CHAT_MSG_WHISPER")
 ev:RegisterEvent("CHAT_MSG_BN_WHISPER")
+for _, e in ipairs({ "MERCHANT_SHOW", "BANKFRAME_OPENED", "TRAINER_SHOW", "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" }) do pcall(ev.RegisterEvent, ev, e) end
 ev:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON_NAME then
@@ -3500,6 +3547,10 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 			ReloadUI()
 		elseif db then
 			WoWAI.ArmAutoRefresh()
+			C_Timer.After(0.5, WoWAI.AutoApplyPending)
 		end
+	elseif event == "MERCHANT_SHOW" or event == "BANKFRAME_OPENED" or event == "TRAINER_SHOW" or event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
+		-- A clear order that was waiting for this window.
+		C_Timer.After(0.8, WoWAI.AutoApplyPending)
 	end
 end)

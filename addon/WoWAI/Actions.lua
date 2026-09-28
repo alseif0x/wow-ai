@@ -112,6 +112,17 @@ local DESCRIBE = {
 		return L("Learn talents: ", "Aprender talentos: ") .. table.concat(parts, ", ")
 	end,
 	train_all = function() return L("Learn everything the trainer offers", "Aprender todo lo que ofrece el instructor") end,
+	arrange_bags = function(a) return L("Arrange the bags, first: ", "Colocar las bolsas, primero: ") .. List(a.order, ItemName, 8) end,
+	move_items = function(a)
+		local parts = {}
+		for i, m in ipairs(a.moves) do
+			if i > 6 then table.insert(parts, L("and ", "y ") .. (#a.moves - 6) .. L(" more", " más")) break end
+			local info = D.SlotInfo(m.from[1], m.from[2])
+			local what = info and ItemName(info.itemID) or L("(empty slot)", "(casilla vacía)")
+			table.insert(parts, what .. " " .. m.from[1] .. ":" .. m.from[2] .. " -> " .. m.to[1] .. ":" .. m.to[2])
+		end
+		return L("Move in the bags (bag:slot): ", "Mover en las bolsas (bolsa:casilla): ") .. table.concat(parts, "; ")
+	end,
 }
 
 function M.Describe(a)
@@ -226,6 +237,107 @@ end
 PLAN.clear_actions = function(a, o)
 	for _, slot in ipairs(a.slots) do
 		Add(o, function() Try(ClearCursor); Call(o, PickupAction, slot); Try(ClearCursor) end, 0.1)
+	end
+end
+
+-- Moving items between bag slots: pick up one, put it down on the other (the
+-- game swaps them when the target is taken). Items stay locked for a moment
+-- after a move, until the server confirms, so a locked slot means "wait".
+local function Locked(bag, slot)
+	local info = D.SlotInfo(bag, slot)
+	return info and info.isLocked
+end
+
+local function Swap(o, fromBag, fromSlot, toBag, toSlot)
+	local C = C_Container or {}
+	if not C.PickupContainerItem then o.fail = o.fail + 1; o.err = L("not available in this client", "no disponible en este cliente"); return false end
+	Try(ClearCursor)
+	Try(C.PickupContainerItem, fromBag, fromSlot)
+	if not Try(CursorHasItem) then return false end
+	Try(C.PickupContainerItem, toBag, toSlot)
+	-- Whatever is left on the cursor (a stack that didn't fit) goes back where it came from.
+	if Try(CursorHasItem) then Try(C.PickupContainerItem, fromBag, fromSlot) end
+	Try(ClearCursor)
+	return true
+end
+
+-- The ordinary bags (not the reagent bag, nor profession bags that only take
+-- some items), slot by slot: where arrange_bags lays things out.
+local function GeneralPositions()
+	local out = {}
+	for _, bag in ipairs({ 0, 1, 2, 3, 4 }) do
+		local _, family = Try(C_Container and C_Container.GetContainerNumFreeSlots, bag)
+		if bag == 0 or not family or family == 0 then
+			for slot = 1, Try(C_Container and C_Container.GetContainerNumSlots, bag) or 0 do
+				table.insert(out, { bag = bag, slot = slot })
+			end
+		end
+	end
+	return out
+end
+
+local function IdAt(p)
+	local info = D.SlotInfo(p.bag, p.slot)
+	return info and info.itemID or false
+end
+
+PLAN.move_items = function(a, o)
+	for _, m in ipairs(a.moves) do
+		Add(o, function()
+			if Locked(m.from[1], m.from[2]) or Locked(m.to[1], m.to[2]) then
+				o.fail = o.fail + 1; o.err = L("a slot was busy (the server hadn't confirmed the last move)", "una casilla estaba ocupada (el servidor no había confirmado el movimiento anterior)"); return
+			end
+			if not D.SlotInfo(m.from[1], m.from[2]) then o.fail = o.fail + 1; o.err = L("an empty slot to move from", "una casilla de origen vacía"); return end
+			if Swap(o, m.from[1], m.from[2], m.to[1], m.to[2]) then o.done = o.done + 1 else o.fail = o.fail + 1 end
+		end, 0.35)
+	end
+end
+
+-- The wanted layout is worked out once, at the first step: the listed items
+-- first, in that order, every stack of each; then everything else in the order
+-- it is in now; then the empty slots. Each later step fixes the first slot that
+-- doesn't match, by swapping in a stack of the right item from further on.
+PLAN.arrange_bags = function(a, o)
+	local positions = GeneralPositions()
+	for _ = 1, #positions + 10 do
+		Add(o, function()
+			if o.stop then return end
+			if not o.target then
+				local listed, rest = {}, {}
+				local want = {}
+				for i, id in ipairs(a.order) do want[id] = i end
+				for _, p in ipairs(positions) do
+					local id = IdAt(p)
+					if id and want[id] then table.insert(listed, { id = id, rank = want[id], at = #listed })
+					elseif id then table.insert(rest, id) end
+				end
+				table.sort(listed, function(x, y) if x.rank ~= y.rank then return x.rank < y.rank end return x.at < y.at end)
+				o.target = {}
+				for _, e in ipairs(listed) do table.insert(o.target, e.id) end
+				for _, id in ipairs(rest) do table.insert(o.target, id) end
+				o.pos = 1
+			end
+			for i = o.pos, #positions do
+				local want = o.target[i] or false
+				local have = IdAt(positions[i])
+				if have ~= want then
+					if not want then o.pos = i + 1 return end -- the rest should be empty; nothing to fetch
+					for j = i + 1, #positions do
+						if IdAt(positions[j]) == want then
+							local p, q = positions[i], positions[j]
+							if Locked(p.bag, p.slot) or Locked(q.bag, q.slot) then return end -- wait for the server
+							if Swap(o, q.bag, q.slot, p.bag, p.slot) then o.done = o.done + 1 end
+							o.pos = i
+							return
+						end
+					end
+					-- The item isn't there any more (looted, sold meanwhile): leave the slot.
+					o.pos = i + 1
+					return
+				end
+			end
+			o.stop = true
+		end, 0.3)
 	end
 end
 

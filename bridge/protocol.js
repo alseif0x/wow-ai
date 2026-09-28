@@ -225,8 +225,9 @@ const DATA_HINT = [
   'When answering needs more than the context above (the player\'s bags, bank, gear, spells, action bars, talents, quest details, reputation or macros), do not guess: put a fenced block whose language tag is wowdata right before the TL;DR block, listing what you need, from: bags, bank, gear, spells, bars, talents, quests, reputation, macros. The addon then sends it on its own as the next message of this chat, starting with "[game data]", and you carry on with the player\'s request from there. Keep the reply that asks for it to one short line. bank is only known once the player has opened their bank.',
 ];
 const ACTION_HINT = [
-  'You can also act in the game, but only through the actions below. The addon lists them for the player, in its own words, with an Apply button; nothing runs until they click it, and never in combat. Put them in a fenced block whose language tag is wowact (a JSON array) right before the TL;DR block:',
+  'You can also act in the game, but only through the actions below. The addon lists them for the player, in its own words. When the player plainly asked for exactly those actions they run right away (the bridge checks each against the request); otherwise they wait for the player\'s Apply button. Never in combat. Put them in a fenced block whose language tag is wowact (a JSON array) right before the TL;DR block:',
   '{"op":"sort_bags"} sorts the bags with the game\'s own sorter. {"op":"sort_bank"} and {"op":"deposit_reagents"} need the bank open.',
+  '{"op":"arrange_bags","order":[itemID,...]} puts those items first in the bags, in that order (every stack of each), from bag 0 slot 1 on; the rest keeps its order after them. {"op":"move_items","moves":[{"from":[bag,slot],"to":[bag,slot]},...]} moves the item in one bag slot to another (swapping with what is there); positions come from the "@bag:slot" lists in the bags game data, bags 0-4 plus 5 for the reagent bag.',
   '{"op":"deposit","items":[itemID,...]} moves every stack of those items from the bags to the bank; {"op":"withdraw","items":[itemID,...]} the other way (bank open).',
   '{"op":"sell_junk"} sells the grey items; {"op":"sell_items","items":[itemID,...]} sells those (merchant open).',
   '{"op":"abandon_quests","ids":[questID,...]}; {"op":"track_quests","add":[questID,...],"remove":[questID,...]}.',
@@ -363,6 +364,8 @@ function luaTable(globalName, records, opts = {}) {
     if (Array.isArray(r.cmds) && r.cmds.length) lines.push(`\t\t\tcmds = ${luaValue(r.cmds)},`);
     // The bridge asking for game data before the question runs (jev.js), not a reply.
     if (r.prefetch) lines.push('\t\t\tprefetch = true,');
+    // The actions were plainly asked for: the addon applies them without the click.
+    if (r.auto) lines.push('\t\t\tauto = true,');
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
@@ -587,6 +590,26 @@ const ACTION_OPS = {
     if (Number.isInteger(Number(icon)) && Number(icon) > 0) out.icon = Number(icon);
     else if (typeof icon === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(icon)) out.icon = icon;
     return out;
+  },
+  // Put these items first in the bags, in this order (every stack of each); the
+  // rest keeps its order after them. The addon works out the moves itself.
+  arrange_bags: (a) => { const order = idList(a.order); return order.length ? { order } : null; },
+  // Explicit moves between bag slots, as the "bags" game data shows them
+  // (bag 0-5, slot 1-40). Only the bags: nothing is moved to or from the bank here.
+  move_items: (a, why) => {
+    if (!Array.isArray(a.moves)) return null;
+    const pos = (v) => {
+      const b = Number(Array.isArray(v) ? v[0] : v && v.bag), sl = Number(Array.isArray(v) ? v[1] : v && v.slot);
+      return Number.isInteger(b) && b >= 0 && b <= 5 && Number.isInteger(sl) && sl >= 1 && sl <= 40 ? [b, sl] : null;
+    };
+    const moves = [];
+    for (const m of a.moves.slice(0, ACTION_LIMITS.ids)) {
+      const from = pos(m && m.from), to = pos(m && m.to);
+      if (!from || !to) { why.push('move_items: a move needs from and to as [bag, slot], bag 0-5, slot 1-40'); continue; }
+      if (from[0] === to[0] && from[1] === to[1]) continue;
+      moves.push({ from, to });
+    }
+    return moves.length ? { moves } : null;
   },
   learn_talents: (a, why) => {
     if (!Array.isArray(a.nodes)) return null;

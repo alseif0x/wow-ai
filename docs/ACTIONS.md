@@ -56,8 +56,14 @@ The bridge keeps only the operations below and checks their arguments (types, ra
 | `create_macro` | `name` (≤16), `body` (≤255), `icon`, `perCharacter` | |
 | `learn_talents` | `nodes`: `[{ node, entry?, ranks? }]` (entry for choice nodes) | |
 | `train_all` | | trainer open |
+| `arrange_bags` | `order`: item ids, put first in that order (every stack of each); the rest keeps its order after them | |
+| `move_items` | `moves`: `[{ from: [bag, slot], to: [bag, slot] }]`, bags 0-5, slots 1-40; a taken target swaps | |
 
 There is no operation to delete or destroy items. Every op is a fixed function in `Actions.lua`: nothing the agent writes is ever run as code.
+
+**Clear orders run by themselves.** JEV checks each proposed action against your request (see [VOICE-GAMEPAD-MODELS.md](VOICE-GAMEPAD-MODELS.md#jev)). When every action is plainly what you asked for, the addon applies them without the click: at ≥ 0.85 for actions you can put back by hand, at ≥ 0.95 for selling, abandoning quests, talents and training. In combat they wait for combat to end, and ones that need the bank, a vendor or a trainer run when you open it. The report says "Done without asking". Anything doubtful waits for Apply as below. `/wow-ai autoapply off` (`/ai autoaplicar off`) makes every action wait for Apply.
+
+The `bags` game data lists where each item is (`@bag:slot`) and the size of each bag, so the agent can plan `move_items`.
 
 When you click **Apply** (or type `/wow-ai apply` / `/wow-ai aplicar`):
 

@@ -84,7 +84,15 @@ Every message you type or say gets **one** request, with all its questions answe
 
 ### 2. Reviewing proposed actions
 
-When a reply proposes game actions, each one gets a `noul`: *"Did the player ask for this action, or is it plainly part of doing what they asked?"* The state is your request and the action in words; ids are counted, not listed. Actions under 0.5 are marked **(!)** in the list above Apply. In gamepad mode, **X** needs a second press within 5 s when there are marked actions. Nothing is blocked or run by the review: you still decide.
+When a reply proposes game actions, each one gets a `noul`: *"Did the player ask for this action, or is it plainly part of doing what they asked?"* The state is your request and the action in words; ids are counted, not listed. The review sorts proposals three ways, following TypeSafe's "confidence-gated routing" (act on high confidence, confirm on medium, ask a person on low):
+
+| Review result | What happens |
+|---|---|
+| Every action plainly asked for (≥ `autoApplyLow` 0.85, or ≥ `autoApplyHigh` 0.95 for high-risk ops) | Runs without Apply. High-risk ops are selling, abandoning quests, talents and training. |
+| In between | Waits for Apply, as always. |
+| Under 0.5 | Marked **(!)** in the list above Apply. In gamepad mode, **X** needs a second press within 5 s. |
+
+A quick order uses its intent confidence the same way. `/wow-ai autoapply off` turns the first row off in game; `jev.autoApply: false` turns it off in the bridge.
 
 ### Measured on this PC (2026-09-28), all questions in one request
 
@@ -125,6 +133,7 @@ New `bridge/config.json` blocks. Everything has a default, so a missing block be
   "router": true, "minConfidence": 0.85,
   "prefetch": true, "needThreshold": 0.8, "maxNeeds": 3,
   "review": true, "reviewThreshold": 0.5,
+  "autoApply": true, "autoApplyLow": 0.85, "autoApplyHigh": 0.95,
   "fallbackTier": "balanced", "minTierConfidence": 0.3,
   "tiers": { "fast": "gpt-6-luna--fast", "balanced": "gpt-6-sol", "strong": "anthropic/claude-opus-5-5" }
 },

@@ -648,11 +648,14 @@ function quickOrder(job, q) {
   maybeOfferRestore(job);
   noteMessage(job, 'user', job.text);
   job.agent = 'jev';
+  // A clear order runs at once (the addon applies it); a doubtful one waits for Apply.
+  const auto = actions.length > 0 && J.autoApply(JEV, actions, q.confidence);
   const lines = [`Orden rápida: ${q.es}.`];
-  if (actions.length) lines.push('Pulsa Aplicar (X en el mando) para hacerlo; nada se toca antes.');
+  if (actions.length && auto) lines.push('Hecho: era una orden clara.');
+  else if (actions.length) lines.push('Pulsa Aplicar (X en el mando) para hacerlo; nada se toca antes.');
   else lines.push('Hecho en el mapa.');
-  lines.push('', `TL;DR: ${q.es}${actions.length ? ' (pulsa Aplicar)' : ''}.`);
-  finish(job, 'done', lines.join('\n'), '', [], { need: [], actions, cmds });
+  lines.push('', `TL;DR: ${q.es}${actions.length && !auto ? ' (pulsa Aplicar)' : ''}.`);
+  finish(job, 'done', lines.join('\n'), '', [], { need: [], actions, cmds, auto });
 }
 
 // Ask the addon for the game data the question needs; the question waits in
@@ -676,7 +679,10 @@ async function reviewActions(job, actions) {
   const min = JEV.reviewThreshold || 0.5;
   const flagged = [];
   r.scores.forEach((v, i) => { if (v !== null && v < min) { actions[i].warn = true; flagged.push(`${actions[i].op} ${v.toFixed(2)}`); } });
-  log(`#${job.id} jev review: ${r.scores.map((v, i) => `${actions[i].op} ${v === null ? '?' : v.toFixed(2)}`).join(', ')}${flagged.length ? ' -> flagged ' + flagged.join(', ') : ''}${r.note ? ' [' + r.note + ']' : ''} (${r.ms} ms)`);
+  // Every action plainly asked for: the addon runs them without the Apply click.
+  const auto = !flagged.length && J.autoApply(JEV, actions, r.scores);
+  log(`#${job.id} jev review: ${r.scores.map((v, i) => `${actions[i].op} ${v === null ? '?' : v.toFixed(2)}`).join(', ')}${flagged.length ? ' -> flagged ' + flagged.join(', ') : ''}${auto ? ' -> auto-apply' : ''}${r.note ? ' [' + r.note + ']' : ''} (${r.ms} ms)`);
+  return auto;
 }
 
 function drainQueue() {
@@ -865,9 +871,9 @@ function runJob(job) {
     const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
     if (result && !result.error) {
       const body = String(result.text || '').trim() || (notes.length || game.need.length || game.actions.length ? '' : `(${agent.name} finished without a reply)`);
-      const done = () => finish(job, 'done', (body + extra).trim(), sessionId, [...denied], { need: game.need, actions: game.actions });
-      if (game.actions.length) reviewActions(job, game.actions).catch(e => log(`#${job.id} jev review: ${e.message}`)).finally(done);
-      else done();
+      const done = (auto) => finish(job, 'done', (body + extra).trim(), sessionId, [...denied], { need: game.need, actions: game.actions, auto: auto === true });
+      if (game.actions.length) reviewActions(job, game.actions).then(done, (e) => { log(`#${job.id} jev review: ${e.message}`); done(false); });
+      else done(false);
     } else if (result) {
       finish(job, 'error', (String(result.text || '') + extra).trim(), sessionId, [...denied]);
     } else {
@@ -890,7 +896,7 @@ function finish(job, status, text, session, denied, game = {}) {
   if (!game.quiet) noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
   const need = game.need || [], actions = game.actions || [], cmds = game.cmds || [];
   publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, agent: job.agent || '', need, actions,
-    heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch }, true);
+    heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch, auto: !!game.auto && actions.length > 0 }, true);
   signal('sig', job.id, true);
   // A reply to a voice message is read aloud (voice.speak in config.json).
   if (status === 'done' && !game.quiet && voice.enabled && voice.shouldSpeak(job)) voice.speak(summary || text);
