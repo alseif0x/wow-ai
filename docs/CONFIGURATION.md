@@ -34,6 +34,10 @@ Keys under `agents.claude`, `agents.codex` and `agents.grok` (what each one mean
 
 A `config.json` from before agents existed kept Claude's settings at the top level (`claudePath`, `model`, `permissionMode`, `allowedTools`). The bridge still reads them, under anything in `agents.claude`; `setup.js` moves them down.
 
+## Models, voice and JEV
+
+`opencodex`, `voice` and `jev` blocks: see [VOICE-GAMEPAD-MODELS.md](VOICE-GAMEPAD-MODELS.md#configuration) for every key and its default.
+
 ## Runs
 
 | Key | Default | Meaning |
@@ -60,6 +64,7 @@ Keys under `capture`:
 | `python` | `"python3"` | Linux: interpreter for `capture_x11.py`. |
 | `windowName` | `""` | Linux: find the game window by title substring instead of by WM_CLASS (`<processName>.exe`). |
 | `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
+| `source` | `"auto"` | Linux: where the strip is read from. `root` = the root window (what is on screen, X11); `window` = the game window itself (works under Xwayland, and even when another window covers the game); `auto` = the root first, switching to the window for good the first time the root can't be read. |
 
 The capture region is `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default) at the top-left of the game's client area.
 

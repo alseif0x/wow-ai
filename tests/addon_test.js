@@ -424,7 +424,7 @@ test('a chat can pick its agent: the strip says so, replies are labelled by thei
   rec = stripRecords(vm).find(r => r.text === 'now with codex');
   assert.equal(rec.flags, 'agent=codex');
   assert.equal(vm.evaluate('WoWAIDB.outbox.agent'), 'codex');
-  assert.ok(texts().includes('agent: Codex   mode: pixel'));
+  assert.ok(texts().includes('agent: Codex   model: default model   mode: pixel'));
   const id2 = vm.num('WoWAIDB.chats[1].pendingId');
   nextSlot(vm, slot(`{ chat = "${chatId}", id = ${id2}, status = "done", text = "codex here", agent = "codex" }`));
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');

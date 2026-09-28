@@ -81,6 +81,11 @@ local function Display(s)
 	return (tostring(s or ""):gsub("|", "¦"))
 end
 
+-- Text added for game data, actions and the message queue follows the client's
+-- language: Spanish on esES/esMX, English otherwise.
+local IS_ES = ((GetLocale and GetLocale()) or ""):match("^es") ~= nil
+local function L(en, es) return IS_ES and es or en end
+
 local function Trim(s)
 	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
@@ -108,7 +113,9 @@ end
 -- Agents are named by id as the bridge knows them ("claude", "codex", "grok");
 -- the bridge lists the ones it has, and its default, in every slot file. A chat
 -- with no agent of its own runs on the bridge's default.
-local AGENT_NAMES = { claude = "Claude", codex = "Codex", grok = "Grok" }
+-- "jev" marks a quick order the bridge answered itself: JEV (a decision model,
+-- not a chat model) recognised it, and no agent ran.
+local AGENT_NAMES = { claude = "Claude", codex = "Codex", grok = "Grok", jev = (((GetLocale and GetLocale()) or ""):match("^es") and "Orden rápida" or "Quick order") }
 
 local function AgentName(id)
 	id = tostring(id or "")
@@ -129,6 +136,22 @@ end
 local function ReplyAgentName(c, agent)
 	if agent and agent ~= "" then return AgentName(agent) end
 	return ChatAgentName(c)
+end
+
+-- The model a chat runs on: one of opencodex's (the bridge lists them in every
+-- slot file), "auto" (JEV picks a tier per message), or empty = the agent's own
+-- default from the bridge's config.
+local function ChatModelName(c)
+	local m = c and c.model or ""
+	if m == "" then return L("default model", "modelo por defecto") end
+	if m == "auto" then return L("auto (JEV picks)", "auto (JEV decide)") end
+	return m
+end
+
+-- "gpt-6-sol" for a bubble label: the provider prefix only adds width.
+local function ShortModel(m)
+	m = tostring(m or "")
+	return (m:gsub("^[%w-]+/", ""))
 end
 
 local function Contains(list, v)
@@ -176,6 +199,7 @@ local function AddChat(name, cwd)
 		name = name or ("Chat " .. (#db.chats + 1)),
 		cwd = cwd or (current and current.cwd) or DEFAULT_CWD,
 		agent = (current and current.agent) or "",
+		model = (current and current.model) or "",
 		history = {},
 		unread = 0,
 		created = time(),
@@ -242,14 +266,16 @@ local function InitDB()
 	-- Chats from before agents had names: replies were stored with role "claude".
 	for _, c in ipairs(db.chats) do
 		c.agent = c.agent or ""
+		c.model = c.model or ""
 		for _, m in ipairs(c.history or {}) do
 			if m.role == "claude" then m.role, m.agent = "assistant", m.agent or "claude" end
 		end
 	end
 end
 
-local function AddHistory(chat, role, text, id, denied, agent)
-	table.insert(chat.history, { role = role, text = text, id = id, t = time(), denied = denied, agent = agent })
+-- actions: game actions a reply proposed (Actions.lua), until applied or discarded.
+local function AddHistory(chat, role, text, id, denied, agent, actions, model)
+	table.insert(chat.history, { role = role, text = text, id = id, t = time(), denied = denied, agent = agent, actions = actions, model = model })
 	while #chat.history > MAX_HISTORY do
 		table.remove(chat.history, 1)
 	end
@@ -700,6 +726,34 @@ local function MarkAcked(id)
 	NotedBridge()
 end
 
+-- A voice message goes out empty; the bridge says what it heard, and that
+-- replaces the "listening" placeholder in the transcript (and names the chat).
+local VOICE_PREFIX = "[voz] "
+local function NoteHeard(c, id, heard)
+	if type(heard) ~= "string" or heard == "" then return end
+	for i = #c.history, 1, -1 do
+		local m = c.history[i]
+		if m.id == id and m.role == "user" then
+			if m.voice and m.text ~= VOICE_PREFIX .. heard then
+				m.text = VOICE_PREFIX .. heard
+				m.voice = nil
+				if c.name:match("^Chat %d+$") then c.name = AutoTitle(heard) or c.name end
+				WoWAI.RenderChatList()
+			end
+			return
+		end
+	end
+end
+
+-- Map commands a quick order (JEV) sends back: only these, whatever the bridge says.
+local QUICK_MAP = { next = true, prev = true, stop = true, ore = true, herb = true }
+local function RunQuickCommands(cmds)
+	if type(cmds) ~= "table" or not WoWAIMap then return end
+	for _, cmd in ipairs(cmds) do
+		if type(cmd) == "string" and QUICK_MAP[cmd] then WoWAIMap.Command(cmd) end
+	end
+end
+
 -- Dispatch a list of reply records to the chats waiting for them.
 local function ApplyReplies(replies)
 	local matched = false
@@ -708,9 +762,23 @@ local function ApplyReplies(replies)
 		if c and c.pendingId and r.id == c.pendingId then
 			matched = true
 			MarkAcked(r.id)
+			NoteHeard(c, r.id, r.heard)
 			local denied = type(r.denied) == "table" and #r.denied > 0 and r.denied or nil
 			if r.status == "done" then
-				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary)
+				local actions = type(r.actions) == "table" and #r.actions > 0 and r.actions or nil
+				local need = type(r.need) == "table" and #r.need > 0 and r.need or nil
+				if r.prefetch and need then
+					-- Not a reply: the bridge (JEV) saw the question needs this game data,
+					-- so it goes out now and the question runs with it.
+					c.pendingId = nil
+					c.progress = nil
+					if run.act then run.act[c.id] = nil end
+					WoWAI.Render()
+					C_Timer.After(0.2, function() WoWAI.SendGameData(c.id, need, true) end)
+				else
+					RunQuickCommands(r.cmds)
+					Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, actions, need, r.model)
+				end
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" then
@@ -793,6 +861,8 @@ local function TryLoadSlot(why)
 	if type(data) == "table" then
 		if type(data.agent) == "string" and data.agent ~= "" then run.bridgeAgent = data.agent end
 		if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
+		if type(data.models) == "table" then run.bridgeModels = data.models end
+		if data.voice ~= nil then run.bridgeVoice = data.voice and true or false end
 	end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
@@ -841,7 +911,7 @@ local function Tick()
 		-- A hello only needs the bridge to have been seen; it never escalates.
 		-- A forget is the same, but the bridge must have been seen a moment after
 		-- the record went up, so it had a chance to read it.
-		if (rec.hello or rec.forget) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + (rec.forget and 2 or 0) then
+		if (rec.hello or rec.forget or rec.control) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + ((rec.forget or rec.control) and 2 or 0) then
 			NoteAcked(rec)
 			changed = true
 		end
@@ -849,7 +919,7 @@ local function Tick()
 			if rec.forget then db.forget[rec.forget] = nil end
 			run.outbound[id] = nil
 			changed = true
-		elseif rec.hello and now - rec.sentAt >= 20 then
+		elseif (rec.hello or rec.control) and now - rec.sentAt >= (rec.control and 8 or 20) then
 			run.outbound[id] = nil
 			changed = true
 		elseif now - rec.sentAt >= STRIP_SECONDS then
@@ -899,16 +969,31 @@ local function ProcessInbox()
 	if type(inbox.cwd) == "string" and inbox.cwd ~= "" then run.bridgeCwd = inbox.cwd end
 	if type(inbox.agent) == "string" and inbox.agent ~= "" then run.bridgeAgent = inbox.agent end
 	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
+	if type(inbox.models) == "table" then run.bridgeModels = inbox.models end
+	if inbox.voice ~= nil then run.bridgeVoice = inbox.voice and true or false end
 	ApplyReplies(inbox.replies)
 	if inbox.restore then ImportRestore(inbox.restore) end
 	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
 end
 
-Finish = function(chat, role, text, denied, agent, summary)
-	AddHistory(chat, role, text, chat.pendingId, denied, agent)
+-- Messages typed while a chat was waiting (chat.queue): the next one goes out as
+-- soon as the chat is free. One that can't be sent (too long) is dropped with a
+-- note and the next one is tried.
+local QUEUE_MAX = 10
+local function SendNextQueued(chat)
+	while chat.queue and #chat.queue > 0 and not chat.pendingId and WoWAI.IsConnected() do
+		local q = table.remove(chat.queue, 1)
+		WoWAI.Send(q.text, q.allow, { chat = chat.id })
+	end
+	WoWAI.Render()
+end
+
+Finish = function(chat, role, text, denied, agent, summary, actions, need, model)
+	AddHistory(chat, role, text, chat.pendingId, denied, agent, actions, model ~= "" and model or nil)
 	chat.pendingId = nil
 	chat.progress = nil
 	if run.act then run.act[chat.id] = nil end
+	if db.activeChat == chat.id then run.userScrolled = nil end
 	NotedBridge()
 	local visible = ui.frame and ui.frame:IsShown() and db.activeChat == chat.id
 	if not visible then
@@ -923,6 +1008,21 @@ Finish = function(chat, role, text, denied, agent, summary)
 	end
 	WoWAI.Render()
 	WoWAI.Notify(chat, text, agent, summary)
+	-- The agent asked for game data (```wowdata): answer with it on our own. The
+	-- queue carries on after that exchange.
+	if need then
+		C_Timer.After(0.5, function() WoWAI.SendGameData(chat.id, need) end)
+	elseif chat.queue and #chat.queue > 0 then
+		-- A reply that waits for the player (Apply/Discard, Allow) pauses the queue, so
+		-- the next reply doesn't bury its buttons.
+		if actions or denied then
+			AddHistory(chat, "system", L("Queue paused (" .. #chat.queue .. " waiting): apply or discard the actions, or allow, and it carries on. /wow-ai queue send to go on anyway.",
+				"Cola en pausa (" .. #chat.queue .. " esperando): aplica o descarta las acciones, o da el permiso, y seguirá. /wow-ai cola seguir para seguir igualmente."))
+			WoWAI.Render()
+		else
+			C_Timer.After(0.3, function() SendNextQueued(chat) end)
+		end
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -1188,14 +1288,45 @@ end
 -- Sending
 ---------------------------------------------------------------------------
 
+-- The agent and model a chat's records carry ("agent=codex;model=gpt-6-sol").
+local function ChatTokens(c)
+	local tokens = {}
+	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	if c.model and c.model ~= "" then table.insert(tokens, "model=" .. c.model) end
+	return tokens
+end
+
 -- allow: optional list of permission rules to grant before this message runs.
-function WoWAI.Send(text, allow)
-	local c = ActiveChat()
+-- opts.chat: send in that chat instead of the active one; opts.display: what the
+-- transcript shows instead of the text (the game data the addon sends on its own);
+-- opts.data: this is such a send, not something the player typed; opts.voice: a
+-- voice message: the text is empty and the bridge listens on the microphone.
+function WoWAI.Send(text, allow, opts)
+	opts = opts or {}
+	local c = opts.chat and FindChat(opts.chat) or ActiveChat()
 	if not c then return end
 	text = Trim(text or "")
+	if c.pendingId and opts.voice then
+		AddHistory(c, "system", L("This chat is still waiting for a reply. Speak once it arrives, or switch to another chat.",
+			"Este chat todavía espera una respuesta. Habla cuando llegue, o cambia a otro chat."))
+		WoWAI.Render()
+		return
+	end
 	if c.pendingId then
-		-- Typing while waiting: keep the draft, and check for the reply.
-		if text ~= "" then c.draft = text end
+		if opts.data then return end -- the chat moved on; the agent can ask again
+		-- Typing while waiting queues the message: it goes out after the reply.
+		if text ~= "" then
+			c.queue = c.queue or {}
+			if #c.queue >= QUEUE_MAX then
+				AddHistory(c, "system", L("The queue is full (" .. QUEUE_MAX .. " messages). Wait for a reply, or /wow-ai queue clear.",
+					"La cola está llena (" .. QUEUE_MAX .. " mensajes). Espera a una respuesta, o /wow-ai cola vaciar."))
+			else
+				table.insert(c.queue, { text = text, allow = allow })
+			end
+			WoWAI.Render()
+			return
+		end
+		-- Enter on an empty box while waiting: check for the reply.
 		if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing) then
 			TryLoadSlot("manual")
 		else
@@ -1203,7 +1334,23 @@ function WoWAI.Send(text, allow)
 		end
 		return
 	end
-	if text == "" then return end
+	if text == "" and not opts.voice then return end
+	if opts.voice and not WoWAI.IsConnected() then
+		AddHistory(c, "system", L("Voice needs the bridge: it is not connected. Connect first.", "La voz necesita el puente y no está conectado. Conecta primero."))
+		if not run.connectingAt then WoWAI.Connect() end
+		WoWAI.Render()
+		return
+	end
+	if opts.voice and run.bridgeVoice == false then
+		AddHistory(c, "system", L("The bridge has no voice set up (see docs/VOICE.md).", "El puente no tiene la voz instalada (mira docs/VOICE.md)."))
+		WoWAI.Render()
+		return
+	end
+	if not WoWAI.IsConnected() and opts.data then
+		AddHistory(c, "system", "The agent asked for game data, but the bridge is not connected. Connect and ask again.")
+		WoWAI.Render()
+		return
+	end
 	if not WoWAI.IsConnected() then
 		-- Not connected: the message stays in the box and we try to connect;
 		-- CheckConnection sends it the moment the light turns green. If the bridge
@@ -1217,20 +1364,29 @@ function WoWAI.Send(text, allow)
 	-- Shift-clicked links become [Name] plus their tooltip, which is what the agent can read.
 	local links
 	text, links = WoWAI.ExpandLinks(text)
+	-- How the actions the player applied since the last message went ("[actions] ..."),
+	-- so the agent knows what happened in the game.
+	local shown = opts.display or text
+	if opts.voice then shown = VOICE_PREFIX .. L("listening...", "escuchando...") end
+	if c.actionReport then text = c.actionReport .. (text ~= "" and ("\n\n" .. text) or "") end
 	local limit = Codec.MAX_PAYLOAD - 300
 	if #text > limit then
 		AddHistory(c, "system", "That message is too long for one send (" .. #text .. " chars, max ~" .. limit .. "). Split it up." .. (links > 0 and " Each linked item adds its tooltip to the message." or ""))
 		WoWAI.Render()
 		return
 	end
+	c.actionReport = nil
+	-- Game data sent on the agent's request counts towards a small limit, reset by
+	-- every message the player types (see WoWAI.SendGameData).
+	if not opts.data then c.autoData = 0 end
 	-- The game context rides along when the bridge doesn't have this version yet.
 	local ctx = ContextToSend(limit - #text)
 
 	db.lastSeq = db.lastSeq + 1
 	local id = db.lastSeq
-	local tokens = {}
-	if c.resetNext then table.insert(tokens, "n") end
-	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	local tokens = ChatTokens(c)
+	if c.resetNext then table.insert(tokens, 1, "n") end
+	if opts.voice then table.insert(tokens, "v") end
 	local allowHex
 	if type(allow) == "table" and #allow > 0 then
 		table.insert(tokens, "allow=" .. table.concat(allow, ","))
@@ -1247,6 +1403,7 @@ function WoWAI.Send(text, allow)
 		cwd = ToHex(c.cwd),
 		ctx = ctx and ToHex(ctx) or nil,
 		agent = (c.agent and c.agent ~= "") and c.agent or nil,
+		model = (c.model and c.model ~= "") and c.model or nil,
 		allow = allowHex,
 		newSession = newSession,
 		t = time(),
@@ -1254,7 +1411,9 @@ function WoWAI.Send(text, allow)
 	c.pendingId = id
 	c.draft = nil
 	c.progress = nil
-	AddHistory(c, "user", text, id)
+	AddHistory(c, opts.data and "system" or "user", shown, id)
+	if opts.voice then c.history[#c.history].voice = true end
+	run.userScrolled = nil
 	-- A chat still carrying its default name takes its title from the first message
 	-- you send (system notes like "/wow-ai cd" before it don't count).
 	if c.name:match("^Chat %d+$") then
@@ -1262,7 +1421,7 @@ function WoWAI.Send(text, allow)
 		for _, m in ipairs(c.history) do
 			if m.role == "user" and m.id ~= id then first = false break end
 		end
-		if first then c.name = AutoTitle(text) or c.name end
+		if first and not opts.data and not opts.voice then c.name = AutoTitle(shown) or c.name end
 	end
 	db.settings.shown = true
 
@@ -1341,7 +1500,9 @@ function WoWAI.Resend()
 		end
 	end
 	if not text then return end
-	run.outbound[c.pendingId] = { chat = c.id, cwd = c.cwd, flags = (c.agent and c.agent ~= "") and ("agent=" .. c.agent) or "", name = c.name, text = text, sentAt = GetTime() }
+	-- A voice message is not resent: the moment to speak has passed.
+	if text:sub(1, #VOICE_PREFIX) == VOICE_PREFIX then return end
+	run.outbound[c.pendingId] = { chat = c.id, cwd = c.cwd, flags = table.concat(ChatTokens(c), ";"), name = c.name, text = text, sentAt = GetTime() }
 	run.sentAt = GetTime()
 	run.polls = 0
 	ScheduleNextPoll()
@@ -1355,6 +1516,76 @@ function WoWAI.SendFromInput()
 	ui.input:SetText("")
 	ui.input:ClearFocus() -- hand the keyboard back to the game after sending
 	WoWAI.Send(text)
+end
+
+-- Game data and actions (GameData.lua, Actions.lua, docs/ACTIONS.md).
+local DATA_AUTO_MAX = 2 -- game data sends on the agent's request per message the player types
+
+-- The agent asked for game data (a ```wowdata block): send it as the next message
+-- of that chat, shown in the transcript as one line.
+function WoWAI.SendGameData(chatId, need, prefetch)
+	local c = FindChat(chatId)
+	if not c or not WoWAIData or type(need) ~= "table" or #need == 0 then return end
+	c.autoData = (c.autoData or 0) + 1
+	if c.autoData > DATA_AUTO_MAX then
+		AddHistory(c, "system", L("The agent asked for game data again; not sent this time. Type a message to carry on.",
+			"La IA ha vuelto a pedir datos del juego; esta vez no se envían. Escribe un mensaje para seguir."))
+		WoWAI.Render()
+		return
+	end
+	local header = "[game data] " .. table.concat(need, ", ") .. "\n"
+	-- Room for the header, and for the game context and an actions report riding along.
+	local body = WoWAIData.Collect(need, Codec.MAX_PAYLOAD - 300 - #header - 500)
+	WoWAI.Send(header .. body, nil, { chat = c.id, data = true,
+		display = (prefetch and L("Game data the question needs (JEV), sent with it: ", "Datos del juego que necesita la pregunta (JEV), enviados con ella: ")
+			or L("Game data sent to the agent: ", "Datos del juego enviados a la IA: ")) .. table.concat(need, ", ") })
+end
+
+-- The newest reply of a chat, when it proposes actions nobody applied or discarded yet.
+local function PendingActions(c)
+	for i = #c.history, 1, -1 do
+		local m = c.history[i]
+		if m.role == "assistant" then
+			if type(m.actions) == "table" and #m.actions > 0 then return m, i end
+			return nil
+		end
+	end
+end
+
+-- The Apply button (and /wow-ai apply): run the actions, note how it went in the
+-- transcript and, with the next message, for the agent. Actions waiting for a
+-- window (bank, vendor, trainer) stay on the reply for another Apply.
+function WoWAI.ApplyActions(chatId)
+	local c = (chatId and FindChat(chatId)) or ActiveChat()
+	if not c or not WoWAIActions then return end
+	local m = PendingActions(c)
+	if not m then
+		AddHistory(c, "system", L("There are no proposed actions to apply.", "No hay acciones propuestas que aplicar."))
+		WoWAI.Render()
+		return
+	end
+	local ok, err = WoWAIActions.Run(m.actions, function(lines, pending)
+		m.actions = #pending > 0 and pending or nil
+		local text = table.concat(lines, "\n")
+		AddHistory(c, "system", L("Actions:\n", "Acciones:\n") .. text)
+		c.actionReport = "[actions] " .. (text:gsub("\n", "; "))
+		WoWAI.Render()
+		-- With nothing left to apply, a paused queue carries on (with the report).
+		if not m.actions then SendNextQueued(c) end
+	end)
+	if not ok then AddHistory(c, "system", err) end
+	WoWAI.Render()
+end
+
+function WoWAI.DiscardActions(chatId)
+	local c = (chatId and FindChat(chatId)) or ActiveChat()
+	local m = c and PendingActions(c)
+	if not m then return end
+	m.actions = nil
+	AddHistory(c, "system", L("Proposed actions discarded.", "Acciones propuestas descartadas."))
+	c.actionReport = "[actions] the player discarded the proposed actions"
+	WoWAI.Render()
+	SendNextQueued(c)
 end
 
 -- The Allow button: grant the rules a reply asked for, then tell the agent to carry on.
@@ -1381,6 +1612,7 @@ function WoWAI.SwitchChat(id)
 	end
 	db.activeChat = c.id
 	c.unread = 0
+	run.userScrolled = nil
 	if ui.input then
 		ui.input:SetText(c.draft or "")
 		c.draft = nil
@@ -1526,11 +1758,124 @@ StaticPopupDialogs["WOWAI_AGENT"] = {
 	end,
 }
 
--- Agent dialog for a chat (the active one when no id is given).
+-- Agent picker for a chat (the active one when no id is given). A list of our
+-- own (Picker.lua), which the gamepad can drive too; the old dialog stays as a
+-- fallback. Blizzard's popups are what the gamepad UI trips over.
 function WoWAI.AgentPrompt(id)
 	local c = (id and FindChat(id)) or ActiveChat()
 	if not c then return end
+	if WoWAIPicker then
+		local items = { { value = "", label = L("Bridge default", "El del puente") .. " (" .. (run.bridgeAgent and AgentName(run.bridgeAgent) or "?") .. ")" } }
+		for _, a in ipairs(run.bridgeAgents or { "claude", "codex", "grok" }) do
+			table.insert(items, { value = a, label = AgentName(a) })
+		end
+		WoWAIPicker.Open(L("Agent for ", "Agente para ") .. Display(c.name), items, c.agent or "", function(v) WoWAI.SetAgent(v, c) end)
+		return
+	end
 	StaticPopup_Show("WOWAI_AGENT", AgentList(), run.bridgeAgent and AgentName(run.bridgeAgent) or "unknown until connected", { id = c.id, agent = c.agent or "" })
+end
+
+-- The model this chat runs on: one of the bridge's list (opencodex), "auto"
+-- (JEV picks per message), or empty (the agent's configured default). The
+-- session carries on: the next message just runs on the new model.
+function WoWAI.SetModel(rest, c)
+	c = c or ActiveChat()
+	if not c then return end
+	rest = Trim(rest or "")
+	local low = rest:lower()
+	if low == "-" or low == "default" or low == "defecto" then rest = "" end
+	if low == "auto" then rest = "auto" end
+	if rest == "" and low ~= "-" and low ~= "default" and low ~= "defecto" and c.model == "" then
+		local list = run.bridgeModels and #run.bridgeModels > 0 and table.concat(run.bridgeModels, ", ")
+			or L("unknown until the bridge answers (it reads them from opencodex)", "desconocidos hasta que responda el puente (los lee de opencodex)")
+		AddHistory(c, "system", L("Model: ", "Modelo: ") .. ChatModelName(c) .. ". " .. L("Pick one with /ai model <name>, auto, or default. Models: ", "Elige con /ai modelo <nombre>, auto o defecto. Modelos: ") .. list)
+		WoWAI.Render()
+		return
+	end
+	if rest ~= "" and rest ~= "auto" and run.bridgeModels and #run.bridgeModels > 0 and not Contains(run.bridgeModels, rest) then
+		-- A prefix is enough when it names one model: "opus-5-5", "luna--fast".
+		local hit
+		for _, m in ipairs(run.bridgeModels) do
+			if m:lower():find(low, 1, true) then
+				if hit then hit = nil break end
+				hit = m
+			end
+		end
+		if not hit then
+			AddHistory(c, "system", L("Unknown model \"", "Modelo desconocido \"") .. rest .. "\". " .. L("Models: ", "Modelos: ") .. table.concat(run.bridgeModels, ", "))
+			WoWAI.Render()
+			return
+		end
+		rest = hit
+	end
+	c.model = rest
+	AddHistory(c, "system", L("Model for this chat: ", "Modelo de este chat: ") .. ChatModelName(c))
+	WoWAI.Render()
+end
+
+function WoWAI.ModelPrompt(id)
+	local c = (id and FindChat(id)) or ActiveChat()
+	if not c then return end
+	if not WoWAIPicker then WoWAI.SetModel("", c) return end
+	local items = {
+		{ value = "", label = L("Default (the agent's own)", "Por defecto (el del agente)") },
+		{ value = "auto", label = L("Auto: JEV (a decision AI) picks the model per message", "Auto: JEV (IA de decisiones) elige el modelo en cada mensaje") },
+	}
+	for _, m in ipairs(run.bridgeModels or {}) do table.insert(items, { value = m, label = m }) end
+	if #items == 2 then
+		table.insert(items, { value = nil, label = L("(no model list yet: is opencodex running?)", "(aún sin lista: ¿está opencodex en marcha?)") })
+	end
+	WoWAIPicker.Open(L("Model for ", "Modelo para ") .. Display(c.name), items, c.model or "", function(v) WoWAI.SetModel(v == "" and "default" or v, c) end)
+end
+
+-- Voice: ask the bridge to listen on the microphone for this chat. Hold-to-talk
+-- sends VoiceStop on release, so a short phrase doesn't wait for the silence timer.
+function WoWAI.Voice()
+	local c = ActiveChat()
+	if not c then return end
+	WoWAI.Send("", nil, { voice = true })
+end
+
+function WoWAI.VoiceStop()
+	if db.settings.mode ~= "pixel" then return end
+	local c = ActiveChat()
+	db.lastSeq = db.lastSeq + 1
+	run.outbound[db.lastSeq] = { chat = c and c.id or "", cwd = "", flags = "vs", name = "", text = "", sentAt = GetTime(), control = true }
+	RefreshStrip()
+end
+
+-- For Pad.lua and Picker.lua, which live in their own files.
+function WoWAI.ActiveChat() return ActiveChat() end
+function WoWAI.Chats() return db and db.chats or {} end
+function WoWAI.Frame() return ui.frame end
+function WoWAI.IsPending(c) c = c or ActiveChat() return c and c.pendingId ~= nil end
+function WoWAI.HasActions(c) c = c or ActiveChat() return c and PendingActions(c) ~= nil end
+function WoWAI.HasWarnedActions(c)
+	c = c or ActiveChat()
+	local m = c and PendingActions(c)
+	for _, a in ipairs(m and m.actions or {}) do if a.warn then return true end end
+	return false
+end
+function WoWAI.Note(text) local c = ActiveChat() if c then AddHistory(c, "system", text) WoWAI.Render() end end
+function WoWAI.ModelLabel(c) return ChatModelName(c or ActiveChat()) end
+function WoWAI.L(en, es) return L(en, es) end
+
+-- Scroll the transcript by `delta` lines' worth (negative = up), for the gamepad.
+function WoWAI.ScrollBy(delta)
+	local sf = ui.scroll
+	if not sf then return end
+	local max = sf:GetVerticalScrollRange() or 0
+	local v = math.max(0, math.min(max, (sf:GetVerticalScroll() or 0) + delta * 40))
+	sf:SetVerticalScroll(v)
+	run.userScrolled = v < max - 2
+end
+
+-- Previous/next chat in the left panel's order, wrapping around.
+function WoWAI.CycleChat(dir)
+	local _, i = FindChat(db.activeChat)
+	if not i or #db.chats < 2 then return end
+	local n = ((i - 1 + dir) % #db.chats) + 1
+	WoWAI.SwitchChat(db.chats[n].id)
 end
 
 StaticPopupDialogs["WOWAI_RENAME"] = {
@@ -1687,6 +2032,7 @@ function WoWAI.UpdateStatus()
 		local folder = FolderName(ChatFolder(c))
 		if folder ~= "" then t = t .. "  |cff888888" .. Display(folder) .. "|r" end
 		if c and c.agent and c.agent ~= "" then t = t .. "  |cff888888" .. AgentName(c.agent) .. "|r" end
+		if c and c.model and c.model ~= "" then t = t .. "  |cff888888" .. Display(ShortModel(ChatModelName(c))) .. "|r" end
 		ui.title:SetText(t)
 	end
 	local cwdText
@@ -1705,7 +2051,9 @@ function WoWAI.UpdateStatus()
 	else
 		agentText = "(bridge default)"
 	end
-	ui.cwd:SetText("cwd: " .. cwdText .. "   agent: " .. agentText .. "   mode: " .. mode)
+	ui.cwd:SetText("cwd: " .. cwdText .. "   agent: " .. agentText .. "   " .. L("model", "modelo") .. ": " .. Display(ChatModelName(c)) .. "   mode: " .. mode)
+	if ui.modelBtn then ui.modelBtn:SetText(L("Model", "Modelo") .. ": " .. Display(ShortModel(ChatModelName(c)))) end
+	if ui.talk then ui.talk:SetShown(run.bridgeVoice ~= false) end
 	if ui.resend then ui.resend:SetShown(c and c.pendingId ~= nil and mode == "pixel") end
 	if ui.refresh then ui.refresh:SetShown(mode ~= "pixel" or run.slotsExhausted or run.slotsMissing or run.pixelFailed or false) end
 	WoWAI.UpdateMini()
@@ -1740,6 +2088,18 @@ local function GetBubble(i)
 		WoWAI.Allow(self.chatId, self.rules)
 	end)
 	b.allow:Hide()
+	-- Apply / Discard for the actions a reply proposes (Actions.lua).
+	b.apply = CreateFrame("Button", nil, b, "UIPanelButtonTemplate")
+	b.apply:SetHeight(22)
+	b.apply:SetScript("OnClick", function(self) WoWAI.ApplyActions(self.chatId) end)
+	b.apply:Hide()
+	b.discard = CreateFrame("Button", nil, b, "UIPanelButtonTemplate")
+	b.discard:SetHeight(22)
+	b.discard:SetPoint("LEFT", b.apply, "RIGHT", 6, 0)
+	b.discard:SetText(L("Discard", "Descartar"))
+	b.discard:SetWidth(100)
+	b.discard:SetScript("OnClick", function(self) WoWAI.DiscardActions(self.chatId) end)
+	b.discard:Hide()
 	-- FontStrings can't be selected, so a click opens the message in the copy box.
 	b:EnableMouse(true)
 	b:SetScript("OnMouseUp", function(self, button)
@@ -1756,14 +2116,27 @@ function WoWAI.Render()
 		if not width or width < 80 then width = 400 end
 		ui.content:SetWidth(width)
 		local y, n = 0, 0
-		local function Place(role, text, when, dim, denied, agent)
+		local function Place(role, text, when, dim, denied, agent, actions, model)
 			n = n + 1
 			local b = GetBubble(n)
+			-- Proposed actions are listed in the addon's own words under the reply.
+			if actions and WoWAIActions then
+				local lines, warned = {}, false
+				for _, a in ipairs(actions) do
+					-- JEV's review (bridge) flags actions it doesn't think you asked for.
+					if a.warn then warned = true end
+					table.insert(lines, (a.warn and ("- (!) " .. L("not asked for? ", "¿no lo has pedido? ")) or "- ") .. WoWAIActions.Describe(a))
+				end
+				text = text .. "\n\n" .. L("Proposed actions (nothing happens until you click Apply):", "Acciones propuestas (no se hace nada hasta que pulses Aplicar):") .. "\n" .. table.concat(lines, "\n")
+				if warned then
+					text = text .. "\n" .. L("(!) JEV thinks you didn't ask for these. Check them before applying.", "(!) JEV cree que esto no lo has pedido. Revísalo antes de aplicar.")
+				end
+			end
 			local st = ROLE_STYLE[role] or ROLE_STYLE.system
 			b:SetWidth(width)
 			b.bg:SetColorTexture(st.bg[1], st.bg[2], st.bg[3], st.bg[4])
 			b.accent:SetColorTexture(st.color[1], st.color[2], st.color[3], 0.9)
-			b.who:SetText(st == ROLE_STYLE.assistant and ReplyAgentName(c, agent) or st.label)
+			b.who:SetText(st == ROLE_STYLE.assistant and (ReplyAgentName(c, agent) .. ((model and model ~= "") and ("  |cff999999" .. Display(ShortModel(model)) .. "|r") or "")) or st.label)
 			b.who:SetTextColor(st.color[1], st.color[2], st.color[3])
 			b.when:SetText(when or "")
 			b.body:SetWidth(width - 18)
@@ -1787,6 +2160,22 @@ function WoWAI.Render()
 			else
 				b.allow:Hide()
 			end
+			if actions then
+				b.apply:ClearAllPoints()
+				b.apply:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", 0, -6 - extra)
+				b.apply:SetText(L("Apply", "Aplicar") .. " (" .. #actions .. ")")
+				b.apply:SetWidth(120)
+				b.apply.chatId = c.id
+				b.discard.chatId = c.id
+				local busy = WoWAIActions and WoWAIActions.IsRunning()
+				b.apply:SetEnabled(not busy)
+				b.apply:Show()
+				b.discard:Show()
+				extra = extra + 28
+			else
+				b.apply:Hide()
+				b.discard:Hide()
+			end
 			b:SetHeight(6 + 12 + 4 + h + 8 + extra)
 			b:ClearAllPoints()
 			b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 0, -y)
@@ -1795,10 +2184,13 @@ function WoWAI.Render()
 			y = y + b:GetHeight() + 6
 		end
 		local last = #c.history
+		-- Apply/Discard sit on the newest reply while it has actions left and the chat is idle.
+		local _, actionsAt = PendingActions(c)
+		if c.pendingId then actionsAt = nil end
 		for i, m in ipairs(c.history) do
 			-- The Allow button only makes sense on the newest reply, and only while idle.
 			local denied = (i == last and not c.pendingId and type(m.denied) == "table" and #m.denied > 0) and m.denied or nil
-			Place(m.role, m.text, m.t and date("%H:%M", m.t) or "", false, denied, m.agent)
+			Place(m.role, m.text, m.t and date("%H:%M", m.t) or "", false, denied, m.agent, i == actionsAt and m.actions or nil, m.model)
 		end
 		if c.pendingId then
 			local p = c.progress
@@ -1814,12 +2206,16 @@ function WoWAI.Render()
 				Place("system", "Click the box below and type to start. Shift-click an item, spell or quest to link it into your message. /wow-ai help lists the commands; /ai <text> and /r work from the game chat too.", "", true)
 			end
 		end
+		-- Messages waiting their turn (typed while this chat was busy).
+		for i, q in ipairs(c.queue or {}) do
+			Place("user", q.text, L("queued ", "en cola ") .. i, true)
+		end
 		for i = n + 1, #ui.bubbles do
 			ui.bubbles[i]:Hide()
 		end
 		ui.content:SetHeight(math.max(y, 1))
 		C_Timer.After(0.05, function()
-			if ui.scroll then
+			if ui.scroll and not run.userScrolled then
 				ui.scroll:SetVerticalScroll(ui.scroll:GetVerticalScrollRange())
 			end
 		end)
@@ -2265,7 +2661,7 @@ local function BuildUI()
 	-- row. A plain frame of our own rather than a Blizzard dropdown, so it looks
 	-- the same on every client.
 	local menu = CreateFrame("Frame", "WoWAIChatMenu", f, "BackdropTemplate")
-	menu:SetSize(110, 4 * 20 + 12)
+	menu:SetSize(110, 5 * 20 + 12)
 	menu:SetFrameStrata("TOOLTIP")
 	menu:SetBackdrop({
 		bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -2300,6 +2696,7 @@ local function BuildUI()
 	MenuItem("Rename...", 1, WoWAI.RenamePrompt)
 	MenuItem("Folder...", 2, WoWAI.FolderPrompt)
 	MenuItem("Agent...", 3, WoWAI.AgentPrompt)
+	MenuItem(L("Model...", "Modelo..."), 4, WoWAI.ModelPrompt)
 	-- Close once the mouse has wandered away from the menu and the row it came from.
 	menu:SetScript("OnUpdate", function(self, dt)
 		if not MouseIsOver then return end
@@ -2481,6 +2878,68 @@ local function BuildUI()
 	resend:Hide()
 	ui.resend = resend
 
+	-- Model picker and push-to-talk. Hold "Talk" while speaking (release stops
+	-- listening at once); a click works too, the bridge stops on the silence.
+	-- The model selector sits in the header, top right, like a chat app's model
+	-- dropdown: it names the chat's model and opens the list (Picker.lua) on click.
+	local modelBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
+	modelBtn:SetSize(230, 24)
+	modelBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -34, -10)
+	modelBtn:SetBackdrop({
+		bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 16, edgeSize = 12,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	modelBtn:SetBackdropColor(0.10, 0.10, 0.14, 0.95)
+	modelBtn:SetBackdropBorderColor(1, 0.82, 0.25, 0.9)
+	local mhl = modelBtn:CreateTexture(nil, "HIGHLIGHT")
+	mhl:SetPoint("TOPLEFT", 3, -3)
+	mhl:SetPoint("BOTTOMRIGHT", -3, 3)
+	mhl:SetColorTexture(1, 0.82, 0.25, 0.15)
+	local arrow = modelBtn:CreateTexture(nil, "OVERLAY")
+	arrow:SetSize(14, 14)
+	arrow:SetPoint("RIGHT", modelBtn, "RIGHT", -6, 0)
+	arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+	local mtext = modelBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	mtext:SetPoint("LEFT", modelBtn, "LEFT", 8, 0)
+	mtext:SetPoint("RIGHT", arrow, "LEFT", -4, 0)
+	mtext:SetJustifyH("LEFT")
+	mtext:SetWordWrap(false)
+	function modelBtn:SetText(t) mtext:SetText(t) end
+	modelBtn:SetScript("OnClick", function() WoWAI.ModelPrompt() end)
+	modelBtn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+		GameTooltip:SetText(L("Model for this chat", "Modelo de este chat"))
+		GameTooltip:AddLine(L("Click to pick one from opencodex's list, or Auto (JEV picks per message).",
+			"Pulsa para elegir uno de la lista de opencodex, o Auto (JEV elige en cada mensaje)."), 0.8, 0.8, 0.8, true)
+		GameTooltip:Show()
+	end)
+	modelBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	ui.modelBtn = modelBtn
+	status:SetPoint("RIGHT", modelBtn, "LEFT", -8, 0)
+	title:SetPoint("RIGHT", modelBtn, "LEFT", -8, 0)
+	title:SetJustifyH("LEFT")
+	title:SetWordWrap(false)
+
+	local talk = MakeButton(f, L("Talk", "Hablar"), 80, nil)
+	talk:SetPoint("LEFT", resend, "RIGHT", 6, 0)
+	talk:SetScript("OnMouseDown", function() talk.downAt = GetTime() WoWAI.Voice() end)
+	talk:SetScript("OnMouseUp", function()
+		-- A long press is push-to-talk; a quick click leaves it to the silence detector.
+		if talk.downAt and GetTime() - talk.downAt > 0.6 then WoWAI.VoiceStop() end
+		talk.downAt = nil
+	end)
+	talk:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(L("Talk to the AI", "Habla con la IA"))
+		GameTooltip:AddLine(L("The bridge listens on the PC's microphone: click and speak (it stops when you go quiet), or hold while you speak. /ai voice does the same, and A in gamepad mode (/ai pad).",
+			"El puente escucha por el micrófono del PC: pulsa y habla (para solo cuando te callas), o mantenlo pulsado mientras hablas. /ai voz hace lo mismo, y A en el modo mando (/ai mando)."), 0.8, 0.8, 0.8, true)
+		GameTooltip:Show()
+	end)
+	talk:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	ui.talk = talk
+
 	-- A named, always-present button so a keybinding can click it (see /wow-ai bind).
 	local hotkey = CreateFrame("Button", "WoWAIRefreshButton", UIParent)
 	hotkey:SetSize(1, 1)
@@ -2661,6 +3120,14 @@ local HELP = table.concat({
 	"/wow-ai slots                  how many reply slots are still free this session",
 	"/wow-ai diag                   transport diagnostics (is the cheap sound-file channel working?)",
 	"/wow-ai clear                  clear this chat's transcript",
+	"/wow-ai queue [clear|send]     messages typed while waiting go out one after another; show, empty or resume the queue (/wow-ai cola [vaciar|seguir])",
+	"/wow-ai apply | aplicar        apply the actions the last reply proposes (same as its Apply button)",
+	"/wow-ai discard | descartar    discard them",
+	"/wow-ai data [kinds] | datos   show what the agent gets when it asks for game data: bags bank gear spells bars talents quests reputation macros",
+	"/wow-ai model [name|auto|default] | modelo   the model this chat runs on (opencodex's list; auto = JEV picks per message). No name = pick from a list",
+	"/wow-ai voice | voz            talk: the bridge listens on the PC's microphone and sends what you said (/wow-ai voice stop ends it early)",
+	"/wow-ai pad [on|off] | mando   gamepad mode: the controller drives this window (A talk, B back, X apply, Y menu, d-pad scroll and chats)",
+	"/wow-ai macros                 create the \"IA Voz\" and \"IA Mando\" macros, to put on a (gamepad) action bar",
 }, "\n")
 
 -- What each subcommand accepts, so that free text which happens to start with
@@ -2679,6 +3146,22 @@ local function ChatArgument(rest)
 	return false
 end
 
+-- /wow-ai data: only a list of known kinds (English or Spanish) makes it the
+-- command; "/ai datos de mi personaje" is a message.
+local DATA_WORDS = {
+	bags = "bags", bank = "bank", gear = "gear", spells = "spells", bars = "bars", talents = "talents",
+	quests = "quests", reputation = "reputation", macros = "macros",
+	bolsas = "bags", banco = "bank", equipo = "gear", hechizos = "spells", barras = "bars",
+	talentos = "talents", misiones = "quests", reputacion = "reputation",
+}
+
+local function DataKinds(rest)
+	for w in rest:lower():gmatch("[^%s,]+") do
+		if not DATA_WORDS[w] then return false end
+	end
+	return true
+end
+
 local COMMAND_ARGS = {
 	mini = 0, min = 0, hide = 0, quit = 0, help = 0, clear = 0, delete = 0, reset = 0, copy = 0,
 	cancel = 0, resend = 0, reload = 0, refresh = 0, slots = 0, diag = 0,
@@ -2691,6 +3174,14 @@ local COMMAND_ARGS = {
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
 	map = true, -- /wow-ai map ...: Map.lua (layers, navigator, herb/ore nodes)
+	apply = 0, aplicar = 0, discard = 0, descartar = 0,
+	queue = { [""] = true, clear = true, send = true },
+	cola = { [""] = true, vaciar = true, seguir = true, clear = true, send = true },
+	data = DataKinds, datos = DataKinds,
+	model = 1, modelo = 1,
+	voice = { [""] = true, stop = true }, voz = { [""] = true, stop = true, para = true },
+	pad = { [""] = true, on = true, off = true }, mando = { [""] = true, on = true, off = true },
+	macros = 0,
 }
 
 local function IsCommand(cmd, rest)
@@ -2892,8 +3383,51 @@ SlashCmdList["WOWAI"] = function(msg)
 			c.progress = nil
 			RefreshStrip()
 			if not AnyPending() then keyCatcher:Hide() end
+			SendNextQueued(c) -- the queue goes on with the next message
 		end
 		WoWAI.Render()
+	elseif cmd == "queue" or cmd == "cola" then
+		rest = rest:lower()
+		c.queue = c.queue or {}
+		if rest == "clear" or rest == "vaciar" then
+			local n = #c.queue
+			c.queue = {}
+			AddHistory(c, "system", L("Queue cleared (" .. n .. ").", "Cola vaciada (" .. n .. ")."))
+		elseif rest == "send" or rest == "seguir" then
+			if c.pendingId then
+				AddHistory(c, "system", L("This chat is still waiting for a reply; the queue goes on after it.", "Este chat todavía espera una respuesta; la cola seguirá después."))
+			else
+				SendNextQueued(c)
+			end
+		else
+			AddHistory(c, "system", #c.queue == 0
+				and L("The queue is empty. What you type while a reply is on its way waits here and goes out after it.", "La cola está vacía. Lo que escribas mientras llega una respuesta espera aquí y se envía después.")
+				or (L("Queued messages: ", "Mensajes en cola: ") .. #c.queue .. L(". /wow-ai queue clear empties it.", ". /wow-ai cola vaciar la vacía.")))
+		end
+		WoWAI.Render()
+		WoWAI.Toggle(true)
+	elseif cmd == "apply" or cmd == "aplicar" then
+		WoWAI.ApplyActions()
+		WoWAI.Toggle(true)
+	elseif cmd == "discard" or cmd == "descartar" then
+		WoWAI.DiscardActions()
+	elseif cmd == "data" or cmd == "datos" then
+		if not WoWAIData then return end
+		local kinds = {}
+		for w in rest:lower():gmatch("[^%s,]+") do table.insert(kinds, DATA_WORDS[w]) end
+		if #kinds == 0 then kinds = WoWAIData.KINDS end
+		WoWAI.ShowCopy(WoWAIData.Collect(kinds, 60000))
+	elseif cmd == "model" or cmd == "modelo" then
+		if rest == "" then WoWAI.ModelPrompt() else WoWAI.SetModel(rest, c) end
+		WoWAI.Toggle(true)
+	elseif cmd == "voice" or cmd == "voz" then
+		if rest == "stop" or rest == "para" then WoWAI.VoiceStop() else WoWAI.Toggle(true) WoWAI.Voice() end
+	elseif cmd == "pad" or cmd == "mando" then
+		if WoWAIPad then
+			if rest == "on" then WoWAIPad.Enter() elseif rest == "off" then WoWAIPad.Exit() else WoWAIPad.Toggle() end
+		end
+	elseif cmd == "macros" then
+		if WoWAIPad then WoWAIPad.MakeMacros() end
 	elseif cmd == "clear" then
 		wipe(c.history)
 		WoWAI.Render()

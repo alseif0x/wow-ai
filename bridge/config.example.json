@@ -18,7 +18,8 @@
     "intervalMs": 250,
     "python": "python3",
     "windowName": "",
-    "keepComposited": false
+    "keepComposited": false,
+    "source": "auto"
   },
   "agent": "claude",
   "agents": {
@@ -74,5 +75,59 @@
   "primerFile": "docs/WOW-ADDON-PRIMER.md",
   "pollMs": 750,
   "progressWriteMs": 3000,
-  "timeoutMs": 1800000
+  "timeoutMs": 1800000,
+  "opencodex": {
+    "enabled": true,
+    "url": "http://127.0.0.1:10100",
+    "ocxPath": "",
+    "claudeViaOcx": true
+  },
+  "jev": {
+    "enabled": true,
+    "keyFile": "~/.config/rustic-os/openrouter.env",
+    "timeoutMs": 2500,
+    "router": true,
+    "minConfidence": 0.85,
+    "prefetch": true,
+    "needThreshold": 0.8,
+    "maxNeeds": 3,
+    "review": true,
+    "reviewThreshold": 0.5,
+    "fallbackTier": "balanced",
+    "minTierConfidence": 0.3,
+    "tiers": {
+      "fast": "gpt-6-luna--fast",
+      "balanced": "gpt-6-sol",
+      "strong": "anthropic/claude-opus-5-5"
+    }
+  },
+  "voice": {
+    "enabled": true,
+    "python": "~/.local/share/wow-ai-voice/bin/python",
+    "whisperModel": "small",
+    "device": "cpu",
+    "computeType": "int8",
+    "language": "es",
+    "piperVoice": "~/.local/share/wow-ai-voice/voices/es_ES-davefx-medium.onnx",
+    "recordCommand": [
+      "arecord",
+      "-q",
+      "-f",
+      "S16_LE",
+      "-r",
+      "16000",
+      "-c",
+      "1",
+      "-t",
+      "raw"
+    ],
+    "playCommand": [
+      "pw-play"
+    ],
+    "speak": "voice",
+    "maxMs": 20000,
+    "silenceMs": 1100,
+    "noSpeechMs": 6000,
+    "threshold": 700
+  }
 }

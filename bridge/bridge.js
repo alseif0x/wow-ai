@@ -17,6 +17,8 @@
 //   --once            handle one pending SavedVariables prompt and exit
 //   --inject "text"   pretend the strip said this and exit when done
 //   --agent <id>      agent for --inject (default: "agent" in config.json)
+//   --model <id>      model for --inject (an opencodex id, or "auto")
+//   --voice           with --inject "": listen on the microphone for the message
 //   --project <dir>   default folder for chats that haven't picked one
 //
 // Like the agent CLIs themselves, the bridge works in the folder it was started
@@ -30,6 +32,8 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
+const J = require('./jev');      // quick orders and "auto" model tiers through JEV (docs/JEV.md)
+const V = require('./voice');    // microphone, speech-to-text and read-aloud (docs/VOICE.md)
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -39,7 +43,7 @@ const TMP_DIR = path.join(HERE, 'tmp'); // prompt files for agents that read the
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log('wow-ai [--project <dir>] [--once] [--inject "text" [--agent <id>]]\n\n' +
+  console.log('wow-ai [--project <dir>] [--once] [--inject "text" [--agent <id>] [--model <id>]]\n\n' +
     'Runs the WoW AI bridge. Chats without a folder of their own work in <dir>,\n' +
     'or in the folder you started it from, or in defaultCwd from bridge/config.json.\n' +
     `Agents: ${A.agentIds().join(', ')} (the default is "agent" in config.json; chats pick with /wow-ai agent).`);
@@ -56,6 +60,9 @@ const injectIdx = argv.indexOf('--inject');
 const inject = injectIdx >= 0 ? argv[injectIdx + 1] : null;
 const agentIdx = argv.indexOf('--agent');
 const injectAgent = agentIdx >= 0 ? argv[agentIdx + 1] : '';
+const modelIdx = argv.indexOf('--model');
+const injectModel = modelIdx >= 0 ? P.cleanModel(argv[modelIdx + 1]) : '';
+const injectVoice = argv.includes('--voice'); // --inject "" --voice: listen on the microphone instead
 const exitWhenIdle = once || inject !== null;
 
 // The agent chats use unless they pick their own (/wow-ai agent, "agent=" flag).
@@ -91,6 +98,12 @@ function siblingFolders() {
       .map(d => d.name).sort().slice(0, 30);
   } catch { return []; }
 }
+
+// opencodex (the local model proxy): where its catalog is, and how Claude Code
+// reaches its models. Codex already talks to it through its own config.
+const OCX = Object.assign({ enabled: true, url: 'http://127.0.0.1:10100', ocxPath: '', claudeViaOcx: true }, cfg.opencodex || {});
+const JEV = Object.assign({ enabled: true, router: true }, cfg.jev || {});
+const voice = new V.Voice(cfg, path.join(HERE, 'tmp'), (...a) => log(...a));
 
 const SLOTS = cfg.slots || 200;
 const MAX_PARALLEL = cfg.maxParallel || 3;
@@ -274,10 +287,52 @@ function takeMapCommands(job, text) {
   return { text: blocks.text, note: all.length ? `map: ${all.join('; ')}` : '' };
 }
 
+// ```wowdata and ```wowact blocks in a finished reply (see protocol.js, "Game data
+// and actions"): the text without them, what to put on the reply record, and a
+// note for the reply when something was dropped.
+function takeGameBlocks(job, text) {
+  const data = P.extractDataRequests(text);
+  const acts = P.extractActionBlocks(data.text);
+  if (data.need.length) log(`#${job.id} asks for game data: ${data.need.join(', ')}`);
+  if (acts.actions.length || acts.errors.length) {
+    log(`#${job.id} actions: ${acts.actions.map(a => a.op).join(', ') || 'none'}${acts.errors.length ? ' (' + acts.errors.join('; ') + ')' : ''}`);
+  }
+  return {
+    text: acts.text, need: data.need, actions: acts.actions,
+    note: acts.errors.length ? `actions: ${acts.errors.join('; ')}` : '',
+  };
+}
+
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), map,
+    models: MODELS, voice: voice.enabled });
+}
+
+// The models chats can pick: opencodex's catalog, refreshed every 10 minutes.
+// Empty (and no picker in game) while the proxy is down or turned off.
+let MODELS = Array.isArray(state.models) ? state.models : [];
+async function refreshModels() {
+  if (!OCX.enabled) return;
+  try {
+    const res = await fetch(OCX.url.replace(/\/+$/, '') + '/v1/models', { signal: AbortSignal.timeout(5000) });
+    const json = await res.json();
+    const ids = (json.data || []).map(m => P.cleanModel(m && m.id)).filter(Boolean).slice(0, 60);
+    if (ids.length && ids.join() !== MODELS.join()) {
+      MODELS = ids; state.models = ids; saveState();
+      log(`models: ${ids.length} from opencodex`);
+      publishNow(false);
+    }
+  } catch (e) { if (!MODELS.length) log(`models: opencodex not reachable at ${OCX.url} (${e.name === 'TimeoutError' ? 'timeout' : e.message})`); }
+}
+
+// Claude Code on a model of the proxy's: `ocx claude` sets its gateway variables
+// and execs claude, so the rest of the command line is unchanged.
+function ocxCommand() {
+  const own = OCX.ocxPath || path.join(require('os').homedir(), '.local', 'bin', 'ocx');
+  const file = fs.existsSync(own) ? own : 'ocx';
+  return { file, args: ['claude'], found: true };
 }
 
 function addonInstalled() {
@@ -437,6 +492,27 @@ function allowRules(agentId, rules) {
 function submit(job) {
   if (alreadyHandled(job)) return;
   if (job.ctx !== undefined) setContext(job);
+  if (job.voiceStop) {
+    // Push-to-talk released: stop listening now. No prompt of its own.
+    markHandled(job);
+    saveState();
+    signal('ack', job.id, true);
+    if (voice.busy) { voice.stopListening(); log(`#${job.id} voice: stop`); }
+    return;
+  }
+  if (job.voice && job.heard === undefined) {
+    // A voice message: listen first (the microphone is now, whatever the queue
+    // does), then carry on as if the transcript had been typed.
+    // The strip is read again whenever it changes, so the same record can come
+    // back while its run goes on: listen once per message, ever.
+    const vkey = `${job.session}:${job.id}`;
+    if (listening.has(vkey)) return;
+    listening.add(vkey);
+    while (listening.size > 200) listening.delete(listening.values().next().value);
+    listenFor(job).then((ok) => { if (ok) submit(job); },
+      (e) => { log(`#${job.id} voice failed: ${e.stack || e.message}`); finish(job, 'error', `Voice: ${e.message}`); });
+    return;
+  }
   if (job.forget) {
     // A deleted chat: forget it and ack. No agent run.
     markHandled(job);
@@ -468,7 +544,139 @@ function submit(job) {
     log(`#${job.id}${job.session ? '@' + job.session : ''} queued (${cur ? 'chat busy' : running.size + ' running'})`);
     return;
   }
+  startJob(job);
+}
+
+const listening = new Set(); // "session:id" of voice messages already listened to (the latest 200)
+
+// Record, transcribe, and put the transcript in job.text. false when there is
+// nothing to run (the reply already says why).
+async function listenFor(job) {
+  const key = chatKey(job);
+  const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
+  signal('sig', job.id, false);
+  signal('ack', job.id, true);
+  if (!voice.enabled) {
+    finish(job, 'error', `Voice is not available on the bridge: ${voice.status()}.`);
+    return false;
+  }
+  if (voice.busy) {
+    finish(job, 'error', 'The bridge is already listening for another message. Try again in a moment.');
+    return false;
+  }
+  publish(key, { chat: job.chat, id: job.id, status: 'working', text: 'Escuchando... (habla ahora)', cwd: job.cwd }, true);
+  log(`${tag} voice: listening`);
+  const rec = await voice.listen();
+  log(`${tag} voice: ${rec.reason} after ${rec.ms} ms (speech ${rec.heard ? 'yes' : 'no'}, peak ${rec.peak})`);
+  if (!rec.heard) {
+    finish(job, 'error', rec.peak === 0
+      ? 'The microphone gave pure silence: it is probably muted on the PC (wpctl set-mute @DEFAULT_SOURCE@ 0), or voice.recordCommand points at the wrong device.'
+      : 'No te he oído: no hubo voz en unos segundos. Pulsa otra vez y habla un poco más alto.');
+    return false;
+  }
+  publish(key, { chat: job.chat, id: job.id, status: 'working', text: 'Transcribiendo...', cwd: job.cwd }, true);
+  const t = await voice.transcribe(rec.pcm);
+  log(`${tag} voice: heard "${t.text.slice(0, 120)}" (${t.ms} ms)`);
+  if (!t.text) {
+    finish(job, 'error', 'No te he entendido. Pulsa otra vez y repítelo.');
+    return false;
+  }
+  job.heard = t.text;
+  job.text = job.text ? `${job.text}\n${t.text}` : t.text;
+  return true;
+}
+
+// Before an agent run, one JEV request per message (jev.js, analyze): a quick
+// order it is sure about is answered here; game data the question needs is asked
+// from the addon first, so the agent gets it with the question instead of
+// spending a run asking for it; a chat on "auto" gets a model. Holds the chat's
+// place in `running` meanwhile, so a second message for it queues as usual.
+const prefetched = new Map(); // chatKey -> the question waiting for its game data
+const PREFETCH_MS = 3 * 60 * 1000;
+
+async function startJob(job) {
+  const key = chatKey(job);
+  running.set(key, { job, child: null });
+  try {
+    if (mergePrefetched(job)) { runJob(job); return; }
+    await analyzeJob(job);
+  } catch (e) { log(`#${job.id} before the run: ${e.stack || e.message}`); }
+  if (job.finished) return;
   runJob(job);
+}
+
+// The game data the bridge asked for arrived: put the question back in front.
+function mergePrefetched(job) {
+  const key = chatKey(job);
+  const q = prefetched.get(key);
+  if (!q) return false;
+  if (Date.now() - q.at > PREFETCH_MS) { prefetched.delete(key); return false; }
+  // Something typed before the data came in runs on its own; the question keeps waiting.
+  if (!/^\[game data\]/i.test(String(job.text || '').trim())) return false;
+  prefetched.delete(key);
+  job.text = `${q.text}\n\n${job.text}`;
+  for (const k of ['heard', 'voice', 'model', 'modelUsed']) if (q[k] !== undefined) job[k] = q[k];
+  job.prefetched = true;
+  log(`#${job.id} game data for #${q.id} arrived (${q.needs.join(', ')}): running the question with it`);
+  return true;
+}
+
+async function analyzeJob(job) {
+  const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
+  const plain = !job.newSession && !(Array.isArray(job.allow) && job.allow.length);
+  const wantTier = job.model === 'auto';
+  if (!JEV.enabled || (!plain && !wantTier)) { job.modelUsed = wantTier ? '' : (job.model || ''); return; }
+  const a = await J.analyze(JEV, job.text, { route: plain, tier: wantTier, needs: plain && JEV.prefetch !== false });
+  const parts = [];
+  if (a.quick) parts.push(`quick order ${a.quick.intent} ${a.quick.confidence.toFixed(2)}`);
+  else if (a.intent) parts.push(`intent ${a.intent}`);
+  if (a.tier) parts.push(`${a.tier.tier}${a.tier.score !== undefined ? ' ' + a.tier.score.toFixed(2) : ''} -> ${a.tier.model || '(default)'}${a.tier.note ? ' [' + a.tier.note + ']' : ''}`);
+  if (a.needs.length) parts.push(`needs ${a.needs.join(', ')}`);
+  if (a.note && a.note !== 'nothing to ask') parts.push(a.note);
+  if (parts.length) log(`${tag} jev: ${parts.join('; ')}${a.ms ? ' (' + a.ms + ' ms)' : ''}`);
+  job.modelUsed = wantTier ? ((a.tier && a.tier.model) || '') : (job.model || '');
+  if (a.quick) { quickOrder(job, a.quick); return; }
+  if (a.needs.length) askGameData(job, a.needs);
+}
+
+function quickOrder(job, q) {
+  const why = [];
+  const actions = P.validateActions(q.actions || [], why);
+  const cmds = (q.cmds || []).slice(0, 4);
+  job.cwd = resolveCwd(job.cwd);
+  signal('ack', job.id, true);
+  maybeOfferRestore(job);
+  noteMessage(job, 'user', job.text);
+  job.agent = 'jev';
+  const lines = [`Orden rápida: ${q.es}.`];
+  if (actions.length) lines.push('Pulsa Aplicar (X en el mando) para hacerlo; nada se toca antes.');
+  else lines.push('Hecho en el mapa.');
+  lines.push('', `TL;DR: ${q.es}${actions.length ? ' (pulsa Aplicar)' : ''}.`);
+  finish(job, 'done', lines.join('\n'), '', [], { need: [], actions, cmds });
+}
+
+// Ask the addon for the game data the question needs; the question waits in
+// `prefetched` and runs when the data message comes in (mergePrefetched).
+function askGameData(job, needs) {
+  const key = chatKey(job);
+  job.cwd = resolveCwd(job.cwd);
+  signal('ack', job.id, true);
+  maybeOfferRestore(job);
+  prefetched.set(key, { id: job.id, text: job.text, heard: job.heard, voice: job.voice, model: job.model, modelUsed: job.modelUsed, needs, at: Date.now() });
+  job.agent = 'jev';
+  finish(job, 'done', `Reuniendo datos del juego: ${needs.join(', ')}.`, '', [], { need: needs, actions: [], prefetch: true, quiet: true });
+}
+
+// After a reply that proposes game actions: flag the ones JEV doesn't think the
+// player asked for. The player still decides; this only adds a warning.
+async function reviewActions(job, actions) {
+  const request = J.playerRequest(job.text);
+  if (!JEV.enabled || JEV.review === false || !request || !actions.length) return;
+  const r = await J.review(JEV, request, actions);
+  const min = JEV.reviewThreshold || 0.5;
+  const flagged = [];
+  r.scores.forEach((v, i) => { if (v !== null && v < min) { actions[i].warn = true; flagged.push(`${actions[i].op} ${v.toFixed(2)}`); } });
+  log(`#${job.id} jev review: ${r.scores.map((v, i) => `${actions[i].op} ${v === null ? '?' : v.toFixed(2)}`).join(', ')}${flagged.length ? ' -> flagged ' + flagged.join(', ') : ''}${r.note ? ' [' + r.note + ']' : ''} (${r.ms} ms)`);
 }
 
 function drainQueue() {
@@ -476,7 +684,7 @@ function drainQueue() {
     if (running.size >= MAX_PARALLEL) break;
     if (running.has(key)) continue;
     queued.delete(key);
-    runJob(job);
+    startJob(job);
   }
 }
 
@@ -508,7 +716,12 @@ function runJob(job) {
   job.agent = agentId;
   const agent = A.AGENTS[agentId];
   const acfg = A.agentConfig(cfg, agentId);
-  const cmd = A.resolveCommand(agentId, acfg);
+  // The chat's model (the picker, or "auto" resolved by JEV) over the configured one.
+  // Grok only knows its own models, so a proxy model is left out for it.
+  if (job.modelUsed && agentId !== 'grok') acfg.model = job.modelUsed;
+  const viaOcx = agentId === 'claude' && !!job.modelUsed && OCX.enabled && OCX.claudeViaOcx !== false;
+  const cmd = viaOcx ? ocxCommand() : A.resolveCommand(agentId, acfg);
+  job.modelShown = acfg.model || '';
   if (!cmd.found) {
     log(`${tag} ${agentId} not found: ${cmd.note}`);
     finish(job, 'error', `${agent.name} is not installed on the bridge PC: ${cmd.note}.`);
@@ -554,10 +767,10 @@ function runJob(job) {
     env.WOW_AI_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
-  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
+  log(`${tag} (${job.via}) ${agent.name}${acfg.model ? ' on ' + acfg.model + (viaOcx ? ' via ocx' : '') : ''} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size > 1 ? ' [' + running.size + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
-  publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
+  publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId, heard: job.heard, model: job.modelShown }, true);
   if (input.stdin !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(input.stdin); }
 
   const parser = agent.parser();
@@ -574,7 +787,7 @@ function runJob(job) {
     progress.push(line);
     while (progress.length > 10) progress.shift();
     beat(job);
-    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
+    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId, heard: job.heard, model: job.modelShown }, false);
   };
   // Long thinking stretches produce no tool events; keep the heartbeat alive anyway.
   const keepalive = setInterval(() => beat(job), 45000);
@@ -644,10 +857,17 @@ function runJob(job) {
     const mapped = takeMapCommands(job, result ? result.text : '');
     if (result) result.text = mapped.text;
     if (mapped.note) notes.push(mapped.note);
+    // Game data the agent asked for and actions it proposed (docs/ACTIONS.md):
+    // only from a finished reply, since the player acts on them.
+    const game = takeGameBlocks(job, result && !result.error ? result.text : '');
+    if (result && !result.error) result.text = game.text;
+    if (game.note) notes.push(game.note);
     const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
     if (result && !result.error) {
-      const body = String(result.text || '').trim() || (notes.length ? '' : `(${agent.name} finished without a reply)`);
-      finish(job, 'done', (body + extra).trim(), sessionId, [...denied]);
+      const body = String(result.text || '').trim() || (notes.length || game.need.length || game.actions.length ? '' : `(${agent.name} finished without a reply)`);
+      const done = () => finish(job, 'done', (body + extra).trim(), sessionId, [...denied], { need: game.need, actions: game.actions });
+      if (game.actions.length) reviewActions(job, game.actions).catch(e => log(`#${job.id} jev review: ${e.message}`)).finally(done);
+      else done();
     } else if (result) {
       finish(job, 'error', (String(result.text || '') + extra).trim(), sessionId, [...denied]);
     } else {
@@ -656,7 +876,7 @@ function runJob(job) {
   });
 }
 
-function finish(job, status, text, session, denied) {
+function finish(job, status, text, session, denied, game = {}) {
   if (job.finished) return; // spawn failures fire both 'error' and 'close'
   job.finished = true;
   running.delete(chatKey(job));
@@ -666,9 +886,14 @@ function finish(job, status, text, session, denied) {
   // that part is what the game chat prints; the window gets the whole reply.
   let summary = '';
   if (status === 'done') ({ text, summary } = P.splitSummary(text));
-  noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, agent: job.agent || '' }, true);
+  // A prefetch (askGameData) isn't a reply: the question is still on its way.
+  if (!game.quiet) noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
+  const need = game.need || [], actions = game.actions || [], cmds = game.cmds || [];
+  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, agent: job.agent || '', need, actions,
+    heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch }, true);
   signal('sig', job.id, true);
+  // A reply to a voice message is read aloud (voice.speak in config.json).
+  if (status === 'done' && !game.quiet && voice.enabled && voice.shouldSpeak(job)) voice.speak(summary || text);
   log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars${summary ? ', summary ' + summary.length : ', no summary'})`);
   drainQueue();
   if (exitWhenIdle && running.size === 0) process.exit(status === 'done' ? 0 : 1);
@@ -699,6 +924,7 @@ function captureCommand() {
     '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
   if (cap.windowName) args.push('--window-name', cap.windowName);
   if (cap.keepComposited) args.push('--keep-composited');
+  if (cap.source) args.push('--source', cap.source);
   return [cap.python || 'python3', args];
 }
 
@@ -746,6 +972,9 @@ function banner() {
   console.log(`  fallback : ${SAVED_VARS}`);
   console.log(`  agent    : ${DEFAULT_AGENT} (default; chats pick their own with /wow-ai agent)`);
   for (const id of A.agentIds()) console.log(`  ${id.padEnd(9)}: ${agentLine(id)}`);
+  console.log(`  models   : ${!OCX.enabled ? 'off (opencodex.enabled in config.json)' : MODELS.length ? MODELS.length + ' from opencodex at ' + OCX.url : 'asking opencodex at ' + OCX.url}${OCX.claudeViaOcx !== false ? ' (Claude on a picked model runs through ocx claude)' : ''}`);
+  console.log(`  jev      : ${!JEV.enabled ? 'off (jev.enabled in config.json)' : J.apiKey(JEV) ? 'on (' + [JEV.router !== false && 'quick orders', JEV.prefetch !== false && 'game-data prefetch', JEV.review !== false && 'action review', '"auto" model tiers'].filter(Boolean).join(', ') + ')' : 'NO KEY: set OPENROUTER_API_KEY or jev.keyFile (' + J.DEFAULT_KEY_FILE + ')'}`);
+  console.log(`  voice    : ${voice.status()}`);
   console.log(`  sessions : ${Object.keys(state.sessions).length} saved`);
   const ctx = gameContext();
   console.log(`  context  : ${cfg.gameContext === false ? 'off (gameContext in config.json)' : ctx ? (ctx.split('\n').find(l => /^Character:/i.test(l)) || ctx.split('\n')[0]).slice(0, 100) : 'none yet (the addon sends it with its hello; /wow-ai context in game)'}`);
@@ -755,7 +984,7 @@ function banner() {
 
 banner();
 if (inject !== null) {
-  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
+  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '', model: injectModel, voice: injectVoice });
 } else {
   pollSavedVariables();
   if (once) {
@@ -765,5 +994,8 @@ if (inject !== null) {
     presenceBeat();
     setInterval(presenceBeat, cfg.presenceIntervalMs || 30000);
     if (cap.enabled) startCapture();
+    refreshModels();
+    setInterval(refreshModels, 10 * 60 * 1000);
+    voice.warm();
   }
 }

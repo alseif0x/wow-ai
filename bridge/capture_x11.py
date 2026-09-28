@@ -9,6 +9,7 @@ Zero dependencies: python3 + ctypes against libX11.
   capture_x11.py --test-image strip.png   decode a PNG once and exit (tests)
   capture_x11.py --probe out.png          save what the capture sees once and exit
   capture_x11.py --window-name NAME       match a window by title instead of WM_CLASS
+  capture_x11.py --source window          read the game window itself (Xwayland); default auto
 """
 
 import argparse
@@ -30,6 +31,9 @@ p.add_argument("--process-name", default="WowB")
 p.add_argument("--window-name", default="")
 p.add_argument("--keep-composited", action="store_true",
                help="ask the compositor not to unredirect the game window (_NET_WM_BYPASS_COMPOSITOR=2)")
+p.add_argument("--source", choices=("auto", "root", "window"), default="auto",
+               help="read the strip off the root window (what is on screen), off the game window "
+                    "itself, or try the root and fall back to the window when it fails (Xwayland)")
 p.add_argument("--test-image", default="")
 p.add_argument("--probe", default="")
 args = p.parse_args()
@@ -282,6 +286,7 @@ A_CLIENT_LIST = X.XInternAtom(dpy, b"_NET_CLIENT_LIST", 0)
 A_WINDOW = X.XInternAtom(dpy, b"WINDOW", 0)
 A_CARDINAL = X.XInternAtom(dpy, b"CARDINAL", 0)
 A_BYPASS = X.XInternAtom(dpy, b"_NET_WM_BYPASS_COMPOSITOR", 0)
+A_PID = X.XInternAtom(dpy, b"_NET_WM_PID", 0)
 ZPIXMAP, ALL_PLANES, IS_VIEWABLE = 2, 0xFFFFFFFF, 2
 
 
@@ -312,16 +317,41 @@ def window_matches(w):
             X.XFree(name.value)
             return hit
         return False
-    hint = XClassHint()
-    if not X.XGetClassHint(dpy, w, ctypes.byref(hint)):
-        return False
     want = args.process_name.lower() + ".exe"
+    hint = XClassHint()
     hit = False
-    for ptr in (hint.res_name, hint.res_class):
-        if ptr:
-            hit = hit or ctypes.string_at(ptr).decode("utf-8", "replace").lower() == want
-            X.XFree(ptr)
-    return hit
+    if X.XGetClassHint(dpy, w, ctypes.byref(hint)):
+        for ptr in (hint.res_name, hint.res_class):
+            if ptr:
+                hit = hit or ctypes.string_at(ptr).decode("utf-8", "replace").lower() == want
+                X.XFree(ptr)
+    # Under Proton (Steam, umu, Lutris) the class is steam_app_<id>, whatever the
+    # game: fall back to the process that owns the window.
+    return hit or process_is(window_pid(w), want)
+
+
+def window_pid(w):
+    typ, fmt = Atom(), ctypes.c_int()
+    n, rest, data = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+    if X.XGetWindowProperty(dpy, w, A_PID, 0, 1, 0, A_CARDINAL, ctypes.byref(typ), ctypes.byref(fmt),
+                            ctypes.byref(n), ctypes.byref(rest), ctypes.byref(data)) != 0 or not data:
+        return None
+    pid = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0] if n.value else None
+    X.XFree(data)
+    return pid
+
+
+def process_is(pid, exe):
+    """Whether process pid runs exe: Wine puts the Windows path of the .exe in argv[0]."""
+    if not pid:
+        return False
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            argv0 = f.read().split(b"\0")[0].decode("utf-8", "replace").lower().replace("/", "\\")
+    except OSError:
+        return False
+    end = argv0.find(".exe") + 4
+    return end >= 4 and argv0[:end].endswith("\\" + exe)
 
 
 def find_window():
@@ -349,11 +379,17 @@ def mask_shift(mask):
     return s, (mask >> s) if mask else 1
 
 
-def grab(w):
-    """Capture the strip region of window w from the root window (what is on screen)."""
-    a = attrs(w)
-    if not a or a.map_state != IS_VIEWABLE:
-        return None
+# Under Xwayland the root window holds no picture of the other clients: XGetImage on it
+# fails, while each client window can still be read directly (its own backing buffer,
+# which keeps updating for Vulkan/DXVK games too). "auto" starts on the root and moves
+# to the window for good the first time the root read fails.
+source = args.source if args.source != "auto" else "root"
+
+
+def grab_region(w, a):
+    """(drawable, x0, y0, width, height) of the strip region in the current source."""
+    if source == "window":
+        return w, 0, 0, min(W + SLACK, a.width), min(H + SLACK, a.height)
     rx, ry, child = ctypes.c_int(), ctypes.c_int(), Window()
     before = x_errors[0]
     X.XTranslateCoordinates(dpy, w, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child))
@@ -361,13 +397,29 @@ def grab(w):
     if x_errors[0] != before or not ra:
         return None
     x0, y0 = max(0, rx.value), max(0, ry.value)
-    gw = min(W + SLACK, a.width, ra.width - x0)
-    gh = min(H + SLACK, a.height, ra.height - y0)
+    return root, x0, y0, min(W + SLACK, a.width, ra.width - x0), min(H + SLACK, a.height, ra.height - y0)
+
+
+def grab(w):
+    """Capture the strip region of window w (from the root or the window, see source)."""
+    global source
+    a = attrs(w)
+    if not a or a.map_state != IS_VIEWABLE:
+        return None
+    region = grab_region(w, a)
+    if not region:
+        return None
+    drawable, x0, y0, gw, gh = region
     if gw <= 0 or gh <= 0:
         return None
-    img = X.XGetImage(dpy, root, x0, y0, gw, gh, ALL_PLANES, ZPIXMAP)
+    before = x_errors[0]
+    img = X.XGetImage(dpy, drawable, x0, y0, gw, gh, ALL_PLANES, ZPIXMAP)
     X.XSync(dpy, 0)
     if not img or x_errors[0] != before:
+        if args.source == "auto" and source == "root":
+            source = "window"
+            emit({"info": "the root window can't be read (Xwayland?): capturing the game window itself"})
+            return grab(w)
         return None
     im = img.contents
     try:

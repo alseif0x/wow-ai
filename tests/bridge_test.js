@@ -13,7 +13,7 @@ test('luaStr escapes everything Lua 5.1 needs', () => {
 });
 
 test('parseFlags reads new-session, hello, forget, context, agent and allow lists', () => {
-  const none = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
+  const none = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '', model: '', voice: false, voiceStop: false };
   assert.deepEqual(P.parseFlags(''), none);
   assert.deepEqual(P.parseFlags('n'), { ...none, newSession: true });
   assert.deepEqual(P.parseFlags('h'), { ...none, hello: true });
@@ -22,13 +22,20 @@ test('parseFlags reads new-session, hello, forget, context, agent and allow list
   assert.deepEqual(P.parseFlags('n;allow=WebSearch, Bash(git:*),'), { ...none, newSession: true, allow: ['WebSearch', 'Bash(git:*)'] });
   assert.deepEqual(P.parseFlags('agent=Codex'), { ...none, agent: 'codex' });
   assert.deepEqual(P.parseFlags('n;agent=grok;allow=WebSearch'), { ...none, newSession: true, agent: 'grok', allow: ['WebSearch'] });
+  // A model from opencodex's list, a voice message, and "stop listening".
+  assert.deepEqual(P.parseFlags('agent=claude;model=anthropic/claude-opus-5-5'), { ...none, agent: 'claude', model: 'anthropic/claude-opus-5-5' });
+  assert.deepEqual(P.parseFlags('model=auto;v'), { ...none, model: 'auto', voice: true });
+  assert.deepEqual(P.parseFlags('vs'), { ...none, voiceStop: true });
+  // Anything that isn't a plain model id never reaches a command line.
+  assert.equal(P.parseFlags('model=$(rm -rf ~)').model, '');
+  assert.equal(P.parseFlags('model=--dangerously-skip').model, '');
 });
 
 test('jobsFromStrip parses the current record format and keeps separators inside text', () => {
   const rec = ['sess', 'chat1', '12', 'realms', 'allow=WebSearch', 'My chat', 'hello\x1Fworld'].join('\x1F');
   const jobs = P.jobsFromStrip(12, rec);
   assert.equal(jobs.length, 1);
-  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
+  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, allow: ['WebSearch'], agent: '', model: '', voice: false, voiceStop: false, name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
   // A chat that picked its own agent says so in the flags.
   const codex = P.jobsFromStrip(13, ['sess', 'chat1', '13', '', 'agent=codex', 'My chat', 'hi'].join('\x1F'))[0];
   assert.equal(codex.agent, 'codex');

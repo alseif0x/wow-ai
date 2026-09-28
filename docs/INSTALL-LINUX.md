@@ -4,7 +4,7 @@ The addon is the same; only the bridge's screen capture differs. On Linux the br
 
 ## Requirements
 
-- An **X11** session (`echo $XDG_SESSION_TYPE` prints `x11`). Wayland blocks reading other windows' pixels.
+- An X11 session, or a **Wayland** session where the game runs through Xwayland (the usual case for Wine). Under Xwayland the root window can't be read, so the capture reads the game window itself instead (`capture.source`, `auto` by default). This was checked on GNOME 50 with an NVIDIA GPU and a Vulkan (DXVK/VKD3D) game window.
 - The game under Wine (Lutris, Bottles, a hand-made prefix...), **windowed or borderless**.
 - Node.js 22.2+, python3, and at least one agent CLI logged in (see [AGENTS.md](AGENTS.md)).
 

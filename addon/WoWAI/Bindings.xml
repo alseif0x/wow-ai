@@ -1,0 +1,11 @@
+<Bindings>
+	<Binding name="WOWAI_TOGGLE" header="WOWAI" category="ADDONS">
+		WoWAI.Toggle()
+	</Binding>
+	<Binding name="WOWAI_PAD" category="ADDONS">
+		WoWAIPad.Toggle()
+	</Binding>
+	<Binding name="WOWAI_TALK" runOnUp="true" category="ADDONS">
+		WoWAIPad.TalkBinding(keystate)
+	</Binding>
+</Bindings>

@@ -171,6 +171,14 @@ function PlaySoundFile(path) if STUB.sounds[path] then return true, 1 end return
 function StopSound() end
 function GetPhysicalScreenSize() return 1920, 1080 end
 function SetBinding(key, cmd) STUB.bindings[key] = cmd end
+-- Gamepad mode (Pad.lua) puts priority override bindings on its own frame.
+STUB.overrides, STUB.macros = {}, {}
+function SetOverrideBinding(owner, priority, key, cmd) STUB.overrides[key] = { owner = owner, priority = priority, cmd = cmd } end
+function ClearOverrideBindings(owner)
+	for k, v in pairs(STUB.overrides) do if v.owner == owner then STUB.overrides[k] = nil end end
+end
+function GetMacroIndexByName(name) for i, m in ipairs(STUB.macros) do if m.name == name then return i end end return 0 end
+function CreateMacro(name, icon, body, perChar) table.insert(STUB.macros, { name = name, icon = icon, body = body }) return #STUB.macros end
 function SaveBindings() end
 function GetCurrentBindingSet() return 1 end
 function SetItemRef() end

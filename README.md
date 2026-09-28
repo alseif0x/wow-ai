@@ -12,9 +12,14 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - The agent knows your character, level, zone, talents, professions and quest log (optional), and you can shift-click items, spells and quests into a message
 - The agent can draw on your world map: numbered routes, quest stops and marks, with a navigator arrow that walks you from stop to stop
 - Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
+- The agent can ask the game for your bags, bank, gear, spells, action bars, talents, quests, reputation and macros, and propose **actions** (sort bags or bank, deposit, sell junk, abandon or track quests, put spells on bars, create macros, learn talents, train, equip) that run only after you click **Apply**. See [docs/ACTIONS.md](docs/ACTIONS.md)
 - An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
 - A status light for the bridge, automatic retries, and recovery of your chats (and map layers) if the beta client wipes addon data
-- Runs on Windows, and on Linux with the game under Wine
+- **A model per chat** from the local opencodex catalog (GPT, Claude, DeepSeek...), picked from a list, or **Auto**: JEV picks a fast, balanced or strong model per message
+- **Voice**: press Talk (or A on the controller), speak, and the bridge transcribes it on the PC; replies to voice messages are read aloud
+- **Gamepad mode** (`/ai mando`): the controller drives the window (A talk, X apply, Y menu, d-pad scroll and chats), without touching Blizzard's gamepad code
+- **Quick orders** through JEV: "ordena las bolsas", "siguiente parada" and a few more are answered by the bridge in about half a second, with no agent run (game actions still wait for Apply). See [docs/VOICE-GAMEPAD-MODELS.md](docs/VOICE-GAMEPAD-MODELS.md)
+- Runs on Windows, and on Linux with the game under Wine (X11, or Wayland through Xwayland)
 
 Nothing here injects code, reads game memory, or generates input. The addon uses documented addon APIs only; the companion reads your screen and writes ordinary files.
 
@@ -123,6 +128,9 @@ Right-clicking a chat in the left panel opens a small menu with **Rename...**, *
 | `/wow-ai longchat on` | let the game chat box take 4000 characters, for long `/ai` messages |
 | `/wow-ai bind <key>` | hotkey: checks for a reply while waiting, otherwise toggles the window |
 | `/wow-ai cancel` | stop waiting on this chat's reply |
+| `/wow-ai queue [clear\|send]` | what you type while a reply is on its way is queued and sent after it, one message at a time (up to 10). A reply that proposes actions or asks for a permission pauses the queue until you decide; `send` resumes it, `clear` empties it (`/wow-ai cola vaciar\|seguir`) |
+| `/wow-ai apply`, `/wow-ai discard` | apply or discard the actions the last reply proposes (`aplicar`, `descartar` work too) |
+| `/wow-ai data [kinds]` | show what the agent gets when it asks for game data, without sending it (`datos`) |
 | `/wow-ai resend` | show the strip again if the bridge missed it |
 | `/wow-ai reload` | reload the UI now (also frees the slot pool) |
 | `/wow-ai mode reload` | fallback transport that costs a `/reload` per step, if pixels or slots can't work |

@@ -113,18 +113,31 @@ function sameFolder(a, b) {
 // session (no prompt), "allow=Rule1,Rule2" = add these permission rules before
 // running, "c" = the record carries a game-context field before the text (an
 // empty one clears the context the bridge keeps), "agent=codex" = run this
-// chat with that agent instead of the bridge's default (see agents.js).
+// chat with that agent instead of the bridge's default (see agents.js),
+// "model=gpt-6-sol" = run it on that model ("auto" = let JEV pick a tier, see
+// jev.js), "v" = a voice message: the bridge listens on the microphone and the
+// transcript becomes the text, "vs" = stop listening now (no prompt).
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
+  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '', model: '', voice: false, voiceStop: false };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
     else if (tok === 'd') out.forget = true;
     else if (tok === 'c') out.context = true;
+    else if (tok === 'v') out.voice = true;
+    else if (tok === 'vs') out.voiceStop = true;
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
     else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
+    else if (tok.startsWith('model=')) out.model = cleanModel(tok.slice(6));
   }
   return out;
+}
+
+// Model ids as opencodex lists them: "gpt-6-sol", "anthropic/claude-opus-5-5",
+// "gpt-6-luna--fast". Anything else is dropped rather than put on a command line.
+function cleanModel(s) {
+  const m = String(s || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/.test(m) ? m : '';
 }
 
 // Strip payload: records separated by \x1E, fields by \x1F:
@@ -169,6 +182,8 @@ function parseOutbox(src) {
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
   if (agent && agent[1]) job.agent = agent[1].toLowerCase();
+  const model = b.match(/\["model"\]\s*=\s*"([^"]*)"/);
+  if (model && cleanModel(model[1])) job.model = cleanModel(model[1]);
   const allow = b.match(/\["allow"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (allow && allow[1]) job.allow = fromHex(allow[1]).split('\x1F').filter(Boolean);
   return job;
@@ -204,6 +219,25 @@ const MAP_HINT = [
   'x and y are map percent on the map with that uiMapID (the context gives the player\'s current one). kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi. Only mark the map when asked for a route, marks or locations; say in the reply what you drew.',
 ];
 
+// How the agent asks the addon for more game data, and proposes game actions the
+// player confirms (see "Game data and actions" below, and docs/ACTIONS.md).
+const DATA_HINT = [
+  'When answering needs more than the context above (the player\'s bags, bank, gear, spells, action bars, talents, quest details, reputation or macros), do not guess: put a fenced block whose language tag is wowdata right before the TL;DR block, listing what you need, from: bags, bank, gear, spells, bars, talents, quests, reputation, macros. The addon then sends it on its own as the next message of this chat, starting with "[game data]", and you carry on with the player\'s request from there. Keep the reply that asks for it to one short line. bank is only known once the player has opened their bank.',
+];
+const ACTION_HINT = [
+  'You can also act in the game, but only through the actions below. The addon lists them for the player, in its own words, with an Apply button; nothing runs until they click it, and never in combat. Put them in a fenced block whose language tag is wowact (a JSON array) right before the TL;DR block:',
+  '{"op":"sort_bags"} sorts the bags with the game\'s own sorter. {"op":"sort_bank"} and {"op":"deposit_reagents"} need the bank open.',
+  '{"op":"deposit","items":[itemID,...]} moves every stack of those items from the bags to the bank; {"op":"withdraw","items":[itemID,...]} the other way (bank open).',
+  '{"op":"sell_junk"} sells the grey items; {"op":"sell_items","items":[itemID,...]} sells those (merchant open).',
+  '{"op":"abandon_quests","ids":[questID,...]}; {"op":"track_quests","add":[questID,...],"remove":[questID,...]}.',
+  '{"op":"place_action","slots":[{"slot":1,"spell":spellID},{"slot":2,"item":itemID},{"slot":3,"macro":"<macro name>"}]} puts spells, items or macros on action slots 1-180 (1-12 is the main bar); {"op":"clear_actions","slots":[slot,...]} empties slots.',
+  '{"op":"create_macro","name":"<up to 16 chars>","body":"<up to 255 chars>","icon":"INV_Misc_QuestionMark","perCharacter":true} creates the macro, or rewrites the one with that name.',
+  '{"op":"learn_talents","nodes":[{"node":nodeID,"entry":entryID,"ranks":1}]} spends talent points on those nodes (entry only for choice nodes) and applies the tree.',
+  '{"op":"train_all"} learns everything the open trainer offers that the player can afford. {"op":"equip","items":[itemID,...]} equips those items from the bags.',
+  'Use the ids from the game data (ask for it with wowdata first when you don\'t have it). Only propose actions when the player asks you to do something in the game, and say in the reply what they will do. Deleting items is not possible.',
+  'A message whose first line starts with "[actions]" is the addon reporting how the actions the player applied went.',
+];
+
 function systemPrompt(ctx, primer) {
   const lines = [...REPLY_FORMAT];
   const text = String(ctx || '').trim();
@@ -214,7 +248,11 @@ function systemPrompt(ctx, primer) {
       '',
       'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.',
       '',
-      ...MAP_HINT);
+      ...MAP_HINT,
+      '',
+      ...DATA_HINT,
+      '',
+      ...ACTION_HINT);
   }
   const ref = text ? String(primer || '').trim() : '';
   if (ref) {
@@ -302,8 +340,12 @@ function luaTable(globalName, records, opts = {}) {
     `\tcwd = ${luaStr(opts.cwd || '')},`,
     `\tagent = ${luaStr(opts.agent || '')},`,
     `\tagents = { ${agents.map(luaStr).join(', ')} },`,
-    '\treplies = {',
   ];
+  // The models the chats can pick (opencodex's catalog), and whether the bridge
+  // can listen on the microphone. Both only when known, so older tests stay exact.
+  if (Array.isArray(opts.models) && opts.models.length) lines.push(`\tmodels = { ${opts.models.map(luaStr).join(', ')} },`);
+  if (opts.voice !== undefined) lines.push(`\tvoice = ${opts.voice ? 'true' : 'false'},`);
+  lines.push('\treplies = {');
   for (const r of records) {
     lines.push('\t\t{');
     lines.push(`\t\t\tchat = ${luaStr(r.chat || '')},`);
@@ -314,9 +356,18 @@ function luaTable(globalName, records, opts = {}) {
     lines.push(`\t\t\tsession = ${luaStr(r.session || '')},`);
     lines.push(`\t\t\tagent = ${luaStr(r.agent || '')},`);
     if (r.summary) lines.push(`\t\t\tsummary = ${luaStr(r.summary)},`);
+    // What the bridge heard on a voice message, the model that answered, and
+    // map commands a quick order (jev.js) asks the addon to run.
+    if (r.heard) lines.push(`\t\t\theard = ${luaStr(r.heard)},`);
+    if (r.model) lines.push(`\t\t\tmodel = ${luaStr(r.model)},`);
+    if (Array.isArray(r.cmds) && r.cmds.length) lines.push(`\t\t\tcmds = ${luaValue(r.cmds)},`);
+    // The bridge asking for game data before the question runs (jev.js), not a reply.
+    if (r.prefetch) lines.push('\t\t\tprefetch = true,');
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
+    if (Array.isArray(r.need) && r.need.length) lines.push(`\t\t\tneed = ${luaValue(r.need)},`);
+    if (Array.isArray(r.actions) && r.actions.length) lines.push(`\t\t\tactions = ${luaValue(r.actions)},`);
     lines.push('\t\t},');
   }
   lines.push('\t},');
@@ -462,6 +513,171 @@ function luaMap(map) {
   return lines.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Game data and actions
+// ---------------------------------------------------------------------------
+//
+// Two more fenced blocks an agent may put in a reply (DATA_HINT and ACTION_HINT
+// in the system prompt say how; docs/ACTIONS.md has the details):
+//   ```wowdata  what game data it needs: bags bank gear ... The reply record
+//               carries it as `need`, and the addon answers on its own with the
+//               next message of the chat (GameData.lua).
+//   ```wowact   game actions it proposes. The bridge keeps only the ones below,
+//               with their arguments checked; the reply record carries them as
+//               `actions`, and the addon lists them in its own words and runs them
+//               when the player clicks Apply (Actions.lua). Nothing the agent
+//               writes is ever run as code.
+
+const DATA_KINDS = ['bags', 'bank', 'gear', 'spells', 'bars', 'talents', 'quests', 'reputation', 'macros'];
+const ACTION_LIMITS = { actions: 20, ids: 40, slots: 60, macroName: 16, macroBody: 255, icon: 64 };
+
+function idList(v, max = ACTION_LIMITS.ids) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) {
+    const n = Number(x);
+    if (Number.isInteger(n) && n > 0 && n < 1e9 && !out.includes(n)) out.push(n);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// op -> (action, why) -> the sanitized action, or null.
+const ACTION_OPS = {
+  sort_bags: () => ({}),
+  sort_bank: () => ({}),
+  deposit_reagents: () => ({}),
+  sell_junk: () => ({}),
+  train_all: () => ({}),
+  deposit: (a) => { const items = idList(a.items); return items.length ? { items } : null; },
+  withdraw: (a) => { const items = idList(a.items); return items.length ? { items } : null; },
+  sell_items: (a) => { const items = idList(a.items); return items.length ? { items } : null; },
+  equip: (a) => { const items = idList(a.items, 20); return items.length ? { items } : null; },
+  abandon_quests: (a) => { const ids = idList(a.ids); return ids.length ? { ids } : null; },
+  track_quests: (a) => {
+    const add = idList(a.add), remove = idList(a.remove);
+    return add.length || remove.length ? { add, remove } : null;
+  },
+  place_action: (a, why) => {
+    if (!Array.isArray(a.slots)) return null;
+    const slots = [];
+    for (const s of a.slots.slice(0, ACTION_LIMITS.slots)) {
+      const slot = Number(s && s.slot);
+      if (!Number.isInteger(slot) || slot < 1 || slot > 180) { why.push('place_action: bad slot'); continue; }
+      const spell = Number(s.spell), item = Number(s.item);
+      if (Number.isInteger(spell) && spell > 0) slots.push({ slot, spell });
+      else if (Number.isInteger(item) && item > 0) slots.push({ slot, item });
+      else if (typeof s.macro === 'string' && s.macro.trim()) slots.push({ slot, macro: cleanText(s.macro, ACTION_LIMITS.macroName) });
+      else why.push(`place_action: slot ${slot} names no spell, item or macro`);
+    }
+    return slots.length ? { slots } : null;
+  },
+  clear_actions: (a) => {
+    const slots = idList(a.slots, ACTION_LIMITS.slots).filter(n => n <= 180);
+    return slots.length ? { slots } : null;
+  },
+  create_macro: (a, why) => {
+    const name = cleanText(a.name, ACTION_LIMITS.macroName);
+    // Macro bodies are multi-line; keep newlines, drop other control characters and |.
+    const body = String(a.body ?? '').replace(/\r/g, '').replace(/[\x00-\x09\x0b-\x1f\x7f|]/g, ' ').trim();
+    if (!name || !body) { why.push('create_macro needs a name and a body'); return null; }
+    if (body.length > ACTION_LIMITS.macroBody) { why.push(`create_macro: body over ${ACTION_LIMITS.macroBody} characters`); return null; }
+    const out = { name, body, perCharacter: a.perCharacter !== false };
+    const icon = a.icon;
+    if (Number.isInteger(Number(icon)) && Number(icon) > 0) out.icon = Number(icon);
+    else if (typeof icon === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(icon)) out.icon = icon;
+    return out;
+  },
+  learn_talents: (a, why) => {
+    if (!Array.isArray(a.nodes)) return null;
+    const nodes = [];
+    for (const n of a.nodes.slice(0, ACTION_LIMITS.ids)) {
+      const node = Number(n && n.node), entry = Number(n && n.entry), ranks = Number((n && n.ranks) ?? 1);
+      if (!Number.isInteger(node) || node <= 0) { why.push('learn_talents: bad node id'); continue; }
+      const t = { node, ranks: Number.isInteger(ranks) ? Math.min(10, Math.max(1, ranks)) : 1 };
+      if (Number.isInteger(entry) && entry > 0) t.entry = entry;
+      nodes.push(t);
+    }
+    return nodes.length ? { nodes } : null;
+  },
+};
+
+// One action, sanitized, or null (with the reason in `why`).
+function validateAction(a, why = []) {
+  if (!a || typeof a !== 'object' || Array.isArray(a)) { why.push('an action is not an object'); return null; }
+  const op = String(a.op ?? '');
+  const check = Object.prototype.hasOwnProperty.call(ACTION_OPS, op) && ACTION_OPS[op];
+  if (!check) { why.push(`unknown action "${op.slice(0, 30)}"`); return null; }
+  const args = check(a, why);
+  if (!args) { why.push(`${op}: nothing valid to do`); return null; }
+  return { op, ...args };
+}
+
+function validateActions(list, why = []) {
+  const out = [];
+  for (const a of list || []) {
+    const v = validateAction(a, why);
+    if (v) out.push(v);
+    if (out.length >= ACTION_LIMITS.actions) { why.push(`kept the first ${ACTION_LIMITS.actions} actions`); break; }
+  }
+  return out;
+}
+
+// Pull every ```<tag> block out of a reply: returns the text without them and
+// their bodies.
+function extractFenced(text, tag) {
+  const bodies = [];
+  const re = new RegExp('```' + tag + '[^\\n]*\\n([\\s\\S]*?)```', 'g');
+  const stripped = String(text ?? '').replace(re, (_, body) => { bodies.push(body.trim()); return ''; })
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return { text: stripped, bodies };
+}
+
+// Agents answering in Spanish sometimes translate the kinds too.
+const DATA_ALIASES = {
+  bolsas: 'bags', inventario: 'bags', banco: 'bank', equipo: 'gear', hechizos: 'spells', barras: 'bars',
+  talentos: 'talents', misiones: 'quests', reputacion: 'reputation', 'reputación': 'reputation',
+};
+
+// ```wowdata blocks: the data kinds asked for, known ones only, in a fixed order.
+function extractDataRequests(text) {
+  const { text: stripped, bodies } = extractFenced(text, 'wowdata');
+  const words = new Set(bodies.join(' ').toLowerCase().split(/[^a-zñáéíóú]+/).filter(Boolean)
+    .map(w => DATA_ALIASES[w] || w));
+  return { text: stripped, need: DATA_KINDS.filter(k => words.has(k)) };
+}
+
+// ```wowact blocks: a JSON array, one object, or one object per line.
+function extractActionBlocks(text) {
+  const { text: stripped, bodies } = extractFenced(text, 'wowact');
+  const raw = [], errors = [];
+  for (const src of bodies) {
+    try {
+      const v = JSON.parse(src);
+      raw.push(...(Array.isArray(v) ? v : [v]));
+    } catch {
+      for (const line of src.split('\n')) {
+        if (!line.trim()) continue;
+        try { raw.push(JSON.parse(line)); } catch { errors.push('unreadable wowact line: ' + line.trim().slice(0, 60)); }
+      }
+    }
+  }
+  const actions = validateActions(raw, errors);
+  return { text: stripped, actions, errors };
+}
+
+// A Lua literal for the simple values actions are made of: numbers, strings,
+// booleans, arrays and objects with identifier keys (validateAction's output).
+function luaValue(v) {
+  if (Array.isArray(v)) return '{ ' + v.map(luaValue).join(', ') + ' }';
+  if (v && typeof v === 'object') {
+    return '{ ' + Object.entries(v).map(([k, x]) => (/^[A-Za-z_]\w*$/.test(k) ? k : `[${luaStr(k)}]`) + ' = ' + luaValue(x)).join(', ') + ' }';
+  }
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '0';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return luaStr(v);
+}
+
 // A valid, silent 10 ms WAV. An empty file "won't play"; this one will.
 const SILENT_WAV = (() => {
   const rate = 8000, samples = 80;
@@ -478,8 +694,9 @@ module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   alreadyHandled, markHandled, pruneStale, MONTH_MS,
   resolveCwd, sameFolder, baseName,
-  parseFlags, jobsFromStrip, parseOutbox, systemPrompt, splitSummary,
+  parseFlags, cleanModel, jobsFromStrip, parseOutbox, systemPrompt, splitSummary,
   ruleFor, describeToolUse,
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
+  DATA_KINDS, ACTION_LIMITS, validateAction, validateActions, extractFenced, extractDataRequests, extractActionBlocks, luaValue,
 };
