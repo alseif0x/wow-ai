@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: WoW AI
-## Notes: Talk to Claude Code, Codex or Grok from inside the game, by keyboard, voice or gamepad, on any opencodex model. Needs the companion bridge (see README).
+## Notes: Talk to Claude Code, Codex, Grok, Antigravity or Hermes from inside the game, by keyboard, voice or gamepad, on any opencodex model; ready-made macros and map routes from the agent. Needs the companion bridge (see README).
 ## Author: chelinho139
 ## Version: 0.5.0
 ## SavedVariables: WoWAIDB, WoWAIMapDB

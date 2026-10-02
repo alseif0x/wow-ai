@@ -4,7 +4,7 @@
   <img src="docs/screenshot.jpg" alt="The WoW AI chat window open in Goldshire, with a message on its way to a coding agent" width="900">
 </p>
 
-Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex) and [xAI's Grok Build](https://docs.x.ai/build/overview). Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
+Chat with your local coding agents from inside **World of Warcraft: Forever**: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex), [xAI's Grok Build](https://docs.x.ai/build/overview), Google's Antigravity CLI and Hermes Agent. Send a task, go back to questing, get pinged in-game when the answer lands. No alt-tabbing, no `/reload` per message.
 
 - Multiple chats, each its own persistent agent session (like separate terminals), running in parallel. Each chat picks its agent and its folder
 - Live progress while the agent works: action count, elapsed time, the files it's editing and commands it's running
@@ -13,13 +13,14 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - The agent can draw on your world map: numbered routes, quest stops and marks, with a navigator arrow that walks you from stop to stop
 - Herb and ore spawns on the world map, filtered by your gathering skill (`/wow-ai map ore`, `/wow-ai map herb`)
 - The agent can ask the game for your bags, bank, gear, spells, action bars, talents, quests, reputation and macros, and propose **actions** (sort bags or bank, deposit, sell junk, abandon or track quests, put spells on bars, create macros, learn talents, train, equip) that run only after you click **Apply**. See [docs/ACTIONS.md](docs/ACTIONS.md)
+- Ready-made macros: ask for one and the reply carries a **Create macro** button that saves it and puts it on your cursor, ready to drop on an action bar (`/wow-ai macro undo` reverts it)
 - An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
 - A status light for the bridge, automatic retries, and recovery of your chats (and map layers) if the beta client wipes addon data
 - **A model per chat** from the local opencodex catalog (GPT, Claude, DeepSeek...), picked from a list, or **Auto**: JEV picks a fast, balanced or strong model per message
 - **Voice**: press Talk (or A on the controller), speak, and the bridge transcribes it on the PC; replies to voice messages are read aloud
 - **Gamepad mode** (`/ai mando`): the controller drives the window (A talk, X apply, Y menu, d-pad scroll and chats), without touching Blizzard's gamepad code
 - **Quick orders** through JEV: "ordena las bolsas", "siguiente parada" and a few more are answered by the bridge in about half a second, with no agent run (game actions still wait for Apply). See [docs/VOICE-GAMEPAD-MODELS.md](docs/VOICE-GAMEPAD-MODELS.md)
-- Runs on Windows, and on Linux with the game under Wine (X11, or Wayland through Xwayland)
+- Runs on Windows, on Linux with the game under Wine (X11, or Wayland through Xwayland), and on macOS with a native client
 
 Nothing here injects code, reads game memory, or generates input. The addon uses documented addon APIs only; the companion reads your screen and writes ordinary files.
 
@@ -36,18 +37,22 @@ The bridge drives whichever of these you have installed; each chat can use a dif
 | **Claude Code** (`claude`) | `claude -p --output-format stream-json`, resumed with `--resume` | `permissionMode` + `allowedTools` rules | yes |
 | **Codex** (`codex`) | `codex exec --json`, resumed with `codex exec resume` | a sandbox chosen from `permissionMode` (read-only, workspace-write, or none) | no: a command the sandbox declined is reported in the reply |
 | **Grok Build** (`grok`) | `grok --prompt-file … --output-format streaming-json`, resumed with `-r` | `permissionMode` + the same `allowedTools` rules, translated to Grok's globs | yes, when Grok reports a refused tool |
+| **Antigravity** (`agy`) | `agy -p=<prompt> --output-format stream-json`, resumed with `--conversation` | Antigravity permission switches | no |
+| **Hermes** (`hermes`) | `hermes chat --query-file -`, resumed with `--resume` | default only; the bridge never uses `--yolo` | no |
 
 `agent` in `bridge/config.json` is the default (`claude`). `/wow-ai agent codex` switches the current chat, or right-click a chat in the left panel and pick **Agent...**; the reply bubbles and the game-chat echo are labelled with whoever answered. A session belongs to the agent that made it, so a chat that changes agent starts a fresh session there (its transcript stays). Install notes, the exact command lines, what each permission mode means per agent, and known limits are in [docs/AGENTS.md](docs/AGENTS.md).
 
 ## Requirements
 
-- Windows (NTFS), or Linux with the game under Wine on an **X11** session and python3 (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md))
+- Windows (NTFS), or Linux with the game under Wine on an **X11** session and python3 (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md)), or macOS with a native client and python3
 - World of Warcraft: Forever (tested on 1.60.1.69913 and 1.60.1.69977, TOC 16001), **windowed or borderless** (exclusive fullscreen blocks screen capture)
 - [Node.js](https://nodejs.org) 22.2 or newer
 - At least one agent CLI, installed and logged in:
   - [Claude Code](https://claude.com/claude-code): `claude --version` works
   - [Codex](https://developers.openai.com/codex): `npm install -g @openai/codex`, then `codex` once to log in
   - [Grok Build](https://docs.x.ai/build/overview): `irm https://x.ai/cli/install.ps1 | iex`, then `grok login`
+  - Antigravity (`agy`): install Google's Antigravity CLI, then run `agy` once to log in
+  - Hermes Agent (`hermes`): install it, then run `hermes setup` once
 
 ## Install
 
@@ -85,6 +90,10 @@ npm start
 
 The bridge captures the game window through X11 (`bridge/capture_x11.py`, no packages needed) and writes the slot files straight into the Wine prefix. Check the capture once: send any message from the game and, while the strip of colored squares is in the top-left corner, run `npm run probe` in a second terminal. It saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
 
+### macOS (native client)
+
+Same commands as Linux: `node setup.js --project <dir>` (it looks for the client under `/Applications/World of Warcraft` and `~/Applications/World of Warcraft`; pass `--wow "<client folder>"` otherwise), then `npm start`. The bridge captures the game window with `bridge/capture_mac.py`, which needs only python3: it finds the window through System Events and grabs its top-left corner with the built-in `screencapture`. The first run asks for two permissions in System Settings, **Automation** (System Events) and **Screen Recording**, for the terminal the bridge runs in. `npm run probe:mac` saves what the capture sees to `bridge/probe.png` and says whether it decoded the strip.
+
 ### Upgrading from wow-claude
 
 This project used to be called wow-claude, with a `WoWClaude` addon and a `/wow-claude` command. `git pull` (or clone the new name) and run `node setup.js` again: it copies your chats and settings from the old addon's saved data, removes the old `WoWClaude` addon and its slot folders so the two don't fight over `/ai` and `/r`, and rewrites the paths and the Claude settings in `bridge/config.json` into the new layout. Then quit and relaunch WoW. If you had installed the command, run `npm unlink -g wow-claude` and `npm link` again, and re-do `/wow-ai bind <key>` if you had a hotkey. Your agent sessions carry on: the bridge keeps them per chat.
@@ -119,7 +128,7 @@ Right-clicking a chat in the left panel opens a small menu with **Rename...**, *
 | `[reply]` | the link under each reply echoed to the game chat: opens that chat in the window, ready to type. (`/r` is the normal whisper reply: taking it over from the chat box taints the box, and the game then blocks every protected command typed there, `/focus` or `/cast` included.) |
 | `/wow-ai new [name]` | new chat = new agent session. Unnamed chats take their title from your first message |
 | `/wow-ai chat <n\|name>` | switch chats (or click the left panel; right-click a row for Rename, Folder and Agent, its trash can deletes it) |
-| `/wow-ai agent [claude\|codex\|grok]` | which agent this chat talks to; no name shows the current one and the bridge's default, `default` goes back to the bridge's. A chat that changes agent starts a fresh session with it |
+| `/wow-ai agent [claude\|codex\|grok\|agy\|hermes]` | which agent this chat talks to; no name shows the current one and the bridge's default, `default` goes back to the bridge's. A chat that changes agent starts a fresh session with it |
 | `/wow-ai cd <folder>` | folder this chat's agent works in (**Folder...** after right-clicking the chat opens the same thing as a dialog). Relative to the bridge's folder (`/wow-ai cd realms`, `/wow-ai cd ../other`), `~` works, a full path too; `/wow-ai cd` alone goes back to the bridge's default. A chat that changes folder starts a fresh session there |
 | `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
 | `/wow-ai context [on\|off]` | show what the agent is told about your character and location, or turn it on/off |
@@ -153,6 +162,16 @@ Along with it, every run gets [docs/WOW-ADDON-PRIMER.md](docs/WOW-ADDON-PRIMER.m
 
 Click the input box, then **shift-click** an item in your bags, a spell in the spellbook, a quest in the log, or a link in the chat: it lands in your message the way it would in the game chat. When you send, each link becomes `[Name]` in the text and its tooltip (an item's stats, a spell's description) is attached below, so the agent sees what you see when hovering it. This works from the game chat box too (`/ai is this an upgrade? [Fine Longsword]`). Without a box focused, shift-click keeps its normal meaning.
 
+### Macros, ready to use
+
+Ask for a macro (*"a Charge macro that uses Intercept in combat"*, *"a mouseover heal"*) and the reply comes with a **Create macro: <name>** button under it. A click saves it (an account macro, or a character one if the agent says so) and puts it on your cursor: click an action bar slot to place it. It is also in `/macro` as usual.
+
+- A macro with that name already there? The button says **Update**, and it asks before replacing a different one of yours. `/wow-ai macro undo` brings back what was there (or removes the macro the button created).
+- Macros that run code (`/run`, `/script`, `/click`) are marked on the button and ask before being saved.
+- Nothing is saved in combat, and the addon never runs a macro: only your own click on the bar does.
+
+The agent writes each macro in a ```` ```wowmacro <Name> ```` block (optional `icon=` and `scope=character` after the name); the bridge checks the game's limits (name up to 16 characters, text up to 255 bytes) and keeps a readable copy in the reply. The buttons live with the message in the addon's saved data, so they don't come back after the beta wipes it (the macro text does).
+
 ### Map, routes and gathering nodes
 
 The agent can draw on your world map. Ask *"route me through copper and tin around here"*, *"plan the quests I can do in Westfall"* or *"where is the nearest mining trainer?"*, and the answer arrives with:
@@ -184,7 +203,7 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 | Key | Meaning |
 |---|---|
 | `defaultCwd` | folder for chats that haven't been given one with `/wow-ai cd` |
-| `agent` | the agent for chats that haven't picked one with `/wow-ai agent` (`claude`, `codex` or `grok`) |
+| `agent` | the agent for chats that haven't picked one with `/wow-ai agent` (`claude`, `codex`, `grok`, `agy` or `hermes`) |
 | `agents.<id>.permissionMode`, `.allowedTools`, `.deniedTools`, `.model` | that agent's permissions, allowlist, denylist and model; `.path` where its executable is if the bridge can't find it, `.extraArgs` anything else to pass it |
 | `agents.codex.networkAccess` | let Codex's sandbox reach the network (default `false`) |
 | `maxParallel` | how many chats may run an agent at once (default 3) |

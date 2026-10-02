@@ -109,7 +109,7 @@ End-to-end prefetch through the bridge, in an isolated copy: "¿Cuál de estos o
 
 Earlier single requests took 6.6 s once and returned HTTP 520 once, which is why every call has a 2.5 s timeout and a fallback.
 
-**Key:** `OPENROUTER_API_KEY` from the environment, or the first `OPENROUTER_API_KEY=...` line of `jev.keyFile` (default `~/.config/rustic-os/openrouter.env`, the same file the RusticOS JEV pilots use). The file is read as data, never run. Cost: about USD 0.00002 per message.
+**Key:** `OPENROUTER_API_KEY` from the environment, or the first `OPENROUTER_API_KEY=...` line of `jev.keyFile` (default `~/.config/wow-ai/openrouter.env`). The file is read as data, never run. Cost: about USD 0.00002 per message.
 
 ### Ideas not built (yet)
 
@@ -129,7 +129,7 @@ New `bridge/config.json` blocks. Everything has a default, so a missing block be
 ```json
 "opencodex": { "enabled": true, "url": "http://127.0.0.1:10100", "ocxPath": "", "claudeViaOcx": true },
 "jev": {
-  "enabled": true, "keyFile": "~/.config/rustic-os/openrouter.env", "timeoutMs": 2500,
+  "enabled": true, "keyFile": "~/.config/wow-ai/openrouter.env", "timeoutMs": 2500,
   "router": true, "minConfidence": 0.85,
   "prefetch": true, "needThreshold": 0.8, "maxNeeds": 3,
   "review": true, "reviewThreshold": 0.5,

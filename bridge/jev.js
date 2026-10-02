@@ -33,7 +33,7 @@ const path = require('path');
 
 const DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 const MODEL = 'typesafe/jev-1.13';
-const DEFAULT_KEY_FILE = path.join(os.homedir(), '.config', 'rustic-os', 'openrouter.env');
+const DEFAULT_KEY_FILE = path.join(os.homedir(), '.config', 'wow-ai', 'openrouter.env');
 
 // The quick orders, in the order JEV sees them. `actions` are validated and
 // shown with Apply like any agent proposal; `cmds` are /wow-ai map subcommands

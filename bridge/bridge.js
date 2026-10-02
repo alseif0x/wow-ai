@@ -792,12 +792,15 @@ function runJob(job) {
   const system = P.systemPrompt(ctx, primer());
   const systemShort = P.systemPrompt(ctx, '');
   const promptFile = path.join(TMP_DIR, `prompt-${job.id}-${Date.now().toString(36)}.txt`);
-  const input = agent.input({ prompt: job.text, system, systemShort, resume });
+  const input = agent.input({ prompt: job.text, system, systemShort, resume, cfg: acfg });
   if (input.promptFile !== undefined) {
     try { fs.mkdirSync(TMP_DIR, { recursive: true }); fs.writeFileSync(promptFile, input.promptFile); }
     catch (e) { finish(job, 'error', `Could not write the prompt file ${promptFile}: ${e.message}`); return; }
   }
-  const args = [...cmd.args, ...agent.args({ cfg: acfg, resume, cwd, system, systemShort, promptFile })];
+  const args = [...cmd.args, ...agent.args({
+    cfg: acfg, resume, cwd, system, systemShort, promptFile,
+    prompt: job.text, timeoutMs: cfg.timeoutMs,
+  })];
   const env = agent.env({ ...process.env });
   // Where this run's tools append map commands (docs/MAP.md); any agent can use it.
   try {
@@ -820,6 +823,7 @@ function runJob(job) {
   const notes = [];        // bridge remarks appended to the reply
   let stderr = '';
   let buffer = '';
+  let stdoutText = '';
   let parserError = false;
 
   const pushProgress = (line) => {
@@ -828,6 +832,8 @@ function runJob(job) {
     beat(job);
     publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId, heard: job.heard, model: job.modelShown }, false);
   };
+  if (agent.stream === 'text') pushProgress(`${agent.name} is working (no live progress)`);
+  if (input.note) notes.push(input.note);
   // Long thinking stretches produce no tool events; keep the heartbeat alive anyway.
   const keepalive = setInterval(() => beat(job), 45000);
 
@@ -858,6 +864,10 @@ function runJob(job) {
   };
 
   child.stdout.on('data', (chunk) => {
+    if (agent.stream === 'text') {
+      stdoutText += chunk.toString('utf8');
+      return;
+    }
     buffer += chunk.toString('utf8');
     let nl;
     while ((nl = buffer.indexOf('\n')) >= 0) {
@@ -886,6 +896,16 @@ function runJob(job) {
 
   child.on('close', (code) => {
     cleanup();
+    if (agent.stream === 'text') {
+      try {
+        const r = parser.finish({ stdout: stdoutText, stderr, code });
+        if (r && r.session) sessionId = r.session;
+        if (r && r.done) result = r.done;
+        if (r && Array.isArray(r.notes)) notes.push(...r.notes);
+      } catch (err) {
+        result = { text: `${agent.name} output parser failed: ${err.message}`, error: true };
+      }
+    }
     if (buffer.trim()) handleLine(buffer.trim());
     if (sessionId) {
       state.sessions[skey] = sessionId;
@@ -924,11 +944,20 @@ function finish(job, status, text, session, denied, game = {}) {
   // A finished reply ends with the "TL;DR:" block the system prompt asks for:
   // that part is what the game chat prints; the window gets the whole reply.
   let summary = '';
-  if (status === 'done') ({ text, summary } = P.splitSummary(text));
+  let macros = [];
+  if (status === 'done') {
+    ({ text, summary } = P.splitSummary(text));
+    // After the split: a macro block the agent put after "TL;DR:" must not end up
+    // in the game-chat summary.
+    const m = P.extractMacros(text);
+    text = m.text + (m.notes.length ? `\n\n[bridge] ${m.notes.join('; ')}` : '');
+    macros = m.macros;
+    summary = P.stripMacroBlocks(summary);
+  }
   // A prefetch (askGameData) isn't a reply: the question is still on its way.
   if (!game.quiet) noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
   const need = game.need || [], actions = game.actions || [], cmds = game.cmds || [];
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, agent: job.agent || '', need, actions,
+  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '', need, actions,
     heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch, auto: !!game.auto && actions.length > 0 }, true);
   signal('sig', job.id, true);
   // A reply to a voice message is read aloud (voice.speak in config.json).
@@ -951,12 +980,19 @@ function pollSavedVariables() {
   if (job) submit(job);
 }
 
-// Windows: capture.ps1 (GDI). Elsewhere: capture_x11.py (the game runs under Wine on X11).
+// Windows: capture.ps1 (GDI). macOS: capture_mac.py (native screencapture). Elsewhere: capture_x11.py (Wine/X11).
 function captureCommand() {
   if (process.platform === 'win32') {
     return ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'capture.ps1'),
       '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
       '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName]];
+  }
+  if (process.platform === 'darwin') {
+    const args = [path.join(HERE, 'capture_mac.py'),
+      '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),
+      '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
+    if (cap.windowName) args.push('--window-name', cap.windowName);
+    return [cap.python || 'python3', args];
   }
   const args = [path.join(HERE, 'capture_x11.py'),
     '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),

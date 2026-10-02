@@ -5,14 +5,14 @@ Two processes that can't talk to each other directly, and how they do anyway.
 ```
    WoW client (Lua sandbox)                        bridge.js (Node, same machine)
    ┌──────────────────────────┐                    ┌─────────────────────────────┐
-   │ WoWAI addon              │  pixels on screen  │ capture.ps1 / capture_x11.py│
+   │ WoWAI addon              │  pixels on screen  │ capture.ps1 / capture_*.py  │
    │  draws message strip ────┼───────────────────▶│  screen-captures the corner │
    │                          │                    │  decodes → {session,chat,id,│
    │                          │                    │            cwd,flags,name,  │
    │                          │                    │            text}            │
    │                          │                    │        │                    │
    │                          │                    │        ▼                    │
-   │                          │                    │  claude / codex / grok      │
+   │                          │                    │  claude / codex / grok / …  │
    │                          │                    │   (per chat, parallel,      │
    │                          │                    │   resumed; agents.js)       │
    │                          │                    │        │                    │
@@ -57,7 +57,7 @@ The strip stays up until the bridge acknowledges the message (see signals) or 40
 
 `capture.ps1` finds the game window by process name, captures the client area's top-left 800×192 px with GDI (`CopyFromScreen`, DPI-aware), samples the center pixel of each cell, and validates magic, length and checksum. It prints one JSON line per new message and rate-limited warnings when a frame is seen but rejected. `bridge.js` restarts it if it exits. Off Windows, `capture_x11.py` does the same through libX11 (ctypes, no packages): it finds the game's Wine window by its WM_CLASS, grabs the corner from the root window, and searches a few pixels around the origin for the magic so a misaligned window still decodes.
 
-Exclusive fullscreen blocks GDI capture; borderless/windowed works. HDR was not tested. On Linux, Wayland sessions block reading other windows, and a compositor that unredirects the game window can hand back a black or stale frame (`capture.keepComposited` asks it not to).
+`capture_mac.py` (macOS, native client) does the same with `screencapture` on the window's top-left corner, found through System Events, and searches a taller area for the magic since the title bar pushes the UI down. Exclusive fullscreen blocks GDI capture; borderless/windowed works. HDR was not tested. On Linux, Wayland sessions block reading other windows, and a compositor that unredirects the game window can hand back a black or stale frame (`capture.keepComposited` asks it not to).
 
 ## Inbound: load-on-demand slots
 
@@ -68,8 +68,8 @@ The bridge doesn't know which slot the game will load next, so every publish wri
 ```lua
 WoWAI_SlotData = {
   ts = "...", now = <bridge epoch seconds>, cwd = "<the bridge's default folder>",
-  agent = "claude", agents = { "claude", "codex", "grok" },   -- the default agent, and the ones the bridge knows
-  replies = { { chat = "...", id = 12, status = "working"|"done"|"error", text = "...", cwd = "...", session = "<agent session id>", agent = "codex", denied = { "WebSearch" } }, … },
+  agent = "claude", agents = { "claude", "codex", "grok", "agy", "hermes" },   -- the default agent, and the ones the bridge knows
+  replies = { { chat = "...", id = 12, status = "working"|"done"|"error", text = "...", cwd = "...", session = "<agent session id>", agent = "codex", denied = { "WebSearch" }, macros = { { name = "Charge", body = "#showtooltip\n/cast Charge", icon = nil, char = false, risky = false } } }, … },
   map = { epoch = "...", version = 3, layers = { … } },  -- the agent's map layers (docs/MAP.md): for a while after they change and after every hello
   restore = { token = "...", chats = { … } },   -- only right after a saved-data reset
 }
@@ -101,7 +101,7 @@ The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/relo
 - **Dedup:** `state.handled[session]` is a set of ids; older single-number state is migrated.
 - **Folders:** the default folder is `--project`, else the folder the bridge was started from (the `wow-ai` command, see README), else `defaultCwd` in the config; it is reported to the addon as `cwd` in every slot file. A chat's folder is resolved against it (`realms` → `<default>\realms`; empty = the default). The agents keep sessions per project folder, so `state.json` remembers the folder each session ran in and a chat that changed folder starts a new session.
 - **Agents:** `agent` in the config is the default; a record's `agent=` flag overrides it for that chat. Unknown names get an error reply listing the known ones; an agent whose CLI isn't installed gets one saying so (`agents.resolveCommand` looks in the installer's folder, on the `PATH`, and behind npm's `.cmd` launchers, which it unwraps to the script or native binary they run rather than going through `cmd.exe`). `state.json` remembers the agent of each session next to its folder, and a chat that changed agent starts a new session. Every slot file names the default agent and the list, so the addon can validate `/wow-ai agent` and label the bubbles; every reply record names the agent that wrote it. See [AGENTS.md](AGENTS.md) for what each CLI is run with.
-- **Jobs:** one agent process per chat, up to `maxParallel` at once, queued per chat beyond that. Claude: `claude -p --output-format stream-json --verbose --permission-mode … --allowedTools … [--resume <id>]`, prompt on stdin; Codex: `codex exec --json -C <folder> --sandbox … [resume <id>] -`, prompt on stdin; Grok: `grok --output-format streaming-json --cwd <folder> --prompt-file … [-r <id>]`. The agent's parser turns its events into progress lines (`edit player.gd`, `$ npm test`) and heartbeat files; its final message becomes the reply. Session ids are stored per chat id in `state.json`, so resuming survives an addon data reset. A run that outlives `timeoutMs` is killed with its whole process tree.
+- **Jobs:** one agent process per chat, up to `maxParallel` at once, queued per chat beyond that. Claude: `claude -p --output-format stream-json --verbose --permission-mode … --allowedTools … [--resume <id>]`, prompt on stdin; Codex: `codex exec --json -C <folder> --sandbox … [resume <id>] -`, prompt on stdin; Grok: `grok --output-format streaming-json --cwd <folder> --prompt-file … [-r <id>]`; Antigravity: `agy -p=<prompt> --output-format stream-json --add-dir <folder> [--conversation <id>]`, prompt on the command line; Hermes: `hermes chat --query-file - --in <folder> [--resume <id>]`, prompt on stdin, plain-text reply read when the process ends. The agent's parser turns its events into progress lines (`edit player.gd`, `$ npm test`) and heartbeat files; its final message becomes the reply. Session ids are stored per chat id in `state.json`, so resuming survives an addon data reset. A run that outlives `timeoutMs` is killed with its whole process tree.
 - **Permissions:** a refused tool (Claude's `permission_denials` in the result, a Grok `tool_call_update` whose status says so) is turned into an allowlist rule (`Bash(<first word>:*)` or the tool name, in Claude's syntax for every agent) and sent along as `denied`; an `allow=` flag on a later message merges them into that agent's `allowedTools` in `config.json`, including through the reload outbox. Codex has no allowlist: a `command_execution` it declined is named at the end of the reply instead.
 - **Game context:** the latest context field received is kept in `state.json` (`context`), an empty one clears it. While one is held and `gameContext` in the config isn't `false`, every run gets `protocol.systemPrompt(context, primer)` (as `--append-system-prompt` for Claude and Grok; at the top of the prompt, marked as context, for Codex, in full on a new session and without the primer on a resumed one): a short note that the user is in WoW talking through the addon, the context lines, what the `[Name]` links and the "Linked from the game" block mean, and the addon/macro primer (`primerFile`, default `docs/WOW-ADDON-PRIMER.md`, read fresh each run). No context, nothing appended, primer included.
 - **Transcripts:** every prompt and reply (with the agent that wrote it) is appended to `transcripts.json` per chat. The first message from an unknown session token means the addon's saved data is fresh, so the next three publishes carry a `restore` bundle (up to 16 chats, 40 messages each) addressed to that token; the addon imports chats it doesn't have.
@@ -127,4 +127,4 @@ The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/relo
 - A raised signal file stays "valid" in the client until a full restart, so slot numbers that wrap around (every 200 messages) lose the cheap signals until then. Self-detected.
 - Message capacity ≈ 3.2 KB per send; longer text is refused with a hint.
 - Replies are published in full (a ~3 KB message can produce a 60 KB reply; that is fine for a slot file). The bridge-side transcript keeps the first 4000 characters of each message, and a restore sends back the last 40 messages per chat at 2000 characters each.
-- Windows, or Linux with the game under Wine on X11 (see [INSTALL-LINUX.md](INSTALL-LINUX.md)). macOS is untested.
+- Windows, Linux with the game under Wine on X11 (see [INSTALL-LINUX.md](INSTALL-LINUX.md)), or macOS with a native client (README, "macOS (native client)"; contributed and tested live by its author).

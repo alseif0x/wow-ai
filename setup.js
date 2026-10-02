@@ -32,29 +32,37 @@ for (let i = 2; i < process.argv.length; i++) {
 
 function isClient(dir) {
   try {
-    return fs.existsSync(path.join(dir, 'Interface')) && fs.readdirSync(dir).some(f => /^Wow.*\.exe$/i.test(f));
+    if (!fs.existsSync(path.join(dir, 'Interface'))) return false;
+    const items = fs.readdirSync(dir);
+    // Windows: the game exe. macOS: the .app bundle. Linux (Wine): the Wine exe.
+    return items.some(f => /^Wow.*\.exe$/i.test(f) || /\.app$/i.test(f));
   } catch { return false; }
 }
 
 function findClient() {
   if (args.wow) {
     if (isClient(args.wow)) return args.wow;
-    throw new Error(`--wow "${args.wow}" does not look like a WoW client folder (needs Interface\\ and a Wow*.exe)`);
+    throw new Error(`--wow "${args.wow}" does not look like a WoW client folder (needs Interface\\ and a game binary)`);
   }
-  const roots = process.platform === 'win32'
-    ? [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, 'D:\\', 'E:\\', 'D:\\Games', 'E:\\Games', 'C:\\Games']
-      .filter(Boolean).map(r => path.join(r, 'World of Warcraft'))
+  let roots;
+  if (process.platform === 'win32') {
+    roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, 'D:\\', 'E:\\', 'D:\\Games', 'E:\\Games', 'C:\\Games']
+      .filter(Boolean).map(r => path.join(r, 'World of Warcraft'));
+  } else if (process.platform === 'darwin') {
+    roots = ['/Applications/World of Warcraft', path.join(os.homedir(), 'Applications', 'World of Warcraft')];
+  } else {
     // Linux: the client lives inside a Wine prefix.
-    : [process.env.WINEPREFIX, path.join(os.homedir(), '.wine'),
+    roots = [process.env.WINEPREFIX, path.join(os.homedir(), '.wine'),
       path.join(os.homedir(), 'Games', 'battlenet')]
       .filter(Boolean).flatMap(p => ['Program Files (x86)', 'Program Files'].map(pf => path.join(p, 'drive_c', pf, 'World of Warcraft')));
+  }
   for (const root of roots) {
     for (const flavor of ['_classic_beta_', '_forever_', '_retail_', '_classic_era_', '_classic_']) {
       const dir = path.join(root, flavor);
       if (isClient(dir)) return dir;
     }
   }
-  throw new Error('Could not find the WoW client. Pass --wow "C:\\path\\to\\World of Warcraft\\_classic_beta_"');
+  throw new Error('Could not find the WoW client. Pass --wow "<path to World of Warcraft/_classic_beta_>"');
 }
 
 function findAccount(client) {
@@ -152,8 +160,19 @@ function writeConfig(client, account) {
   cfg.inboxFile = path.join(cfg.addonDir, 'WoWAI', 'Inbox.lua');
   cfg.savedVariablesFile = path.join(client, 'WTF', 'Account', account, 'SavedVariables', 'WoWAI.lua');
   cfg.defaultCwd = args.project ? path.resolve(args.project) : process.cwd();
-  const exe = fs.readdirSync(client).find(f => /^Wow.*\.exe$/i.test(f));
-  if (exe) cfg.capture.processName = exe.replace(/\.exe$/i, '');
+  const exe = fs.readdirSync(client).find(f => /^Wow.*\.exe$/i.test(f) || /\.app$/i.test(f));
+  if (exe) {
+    let processName = exe.replace(/\.exe$/i, '');
+    // macOS: the process name is the executable inside the .app bundle, not the bundle name.
+    if (process.platform === 'darwin' && exe.toLowerCase().endsWith('.app')) {
+      const macosDir = path.join(client, exe, 'Contents', 'MacOS');
+      try {
+        const bins = fs.readdirSync(macosDir).filter(f => fs.statSync(path.join(macosDir, f)).isFile());
+        if (bins.length) processName = bins[0];
+      } catch {}
+    }
+    cfg.capture.processName = processName;
+  }
   fs.writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + '\n');
   console.log(`config   : wrote ${CONFIG}`);
   return cfg;

@@ -50,6 +50,18 @@
       "networkAccess": false,
       "extraArgs": []
     },
+    "agy": {
+      "path": "",
+      "model": "",
+      "permissionMode": "acceptEdits",
+      "extraArgs": []
+    },
+    "hermes": {
+      "path": "",
+      "model": "",
+      "permissionMode": "acceptEdits",
+      "extraArgs": []
+    },
     "grok": {
       "path": "",
       "model": "",
@@ -84,7 +96,7 @@
   },
   "jev": {
     "enabled": true,
-    "keyFile": "~/.config/rustic-os/openrouter.env",
+    "keyFile": "~/.config/wow-ai/openrouter.env",
     "timeoutMs": 2500,
     "router": true,
     "minConfidence": 0.85,

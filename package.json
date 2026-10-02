@@ -2,7 +2,7 @@
   "name": "wow-ai",
   "version": "0.5.0",
   "private": true,
-  "description": "Chat with local Claude Code, Codex and Grok sessions from inside World of Warcraft: Forever, with no UI reloads. Pixel strip out, load-on-demand slots in.",
+  "description": "Chat with local coding agents (Claude Code, Codex, Grok Build, Antigravity, Hermes) from inside World of Warcraft: Forever, with no UI reloads. Pixel strip out, load-on-demand slots in.",
   "license": "MIT",
   "author": "chelinho139",
   "repository": {
@@ -29,9 +29,10 @@
     "setup": "node setup.js",
     "start": "node bridge/supervisor.js",
     "slots": "node bridge/install-slots.js",
-    "test": "node tests/order_check.js && node --test tests/bridge_test.js tests/agents_test.js tests/restore_test.js tests/addon_test.js tests/map_test.js tests/map_addon_test.js tests/actions_test.js tests/features_test.js && node tests/codec_test.js",
+    "test": "node tests/order_check.js && node --test tests/bridge_test.js tests/agents_test.js tests/restore_test.js tests/addon_test.js tests/map_test.js tests/map_addon_test.js tests/actions_test.js tests/features_test.js tests/macro_test.js && node tests/codec_test.js",
     "test:live": "node tests/inject_test.js",
-    "probe": "python3 bridge/capture_x11.py --probe bridge/probe.png"
+    "probe": "python3 bridge/capture_x11.py --probe bridge/probe.png",
+    "probe:mac": "python3 bridge/capture_mac.py --probe bridge/probe.png"
   },
   "devDependencies": {
     "fengari": "^0.1.4",
