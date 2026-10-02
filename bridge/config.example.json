@@ -144,5 +144,13 @@
     "silenceMs": 1100,
     "noSpeechMs": 6000,
     "threshold": 700
+  },
+  "screen": {
+    "enabled": true,
+    "maxWidth": 1920,
+    "keep": 30,
+    "threshold": 0.6,
+    "autoThreshold": 0.8,
+    "folders": []
   }
 }

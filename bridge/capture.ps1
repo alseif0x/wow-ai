@@ -3,6 +3,8 @@
 # new message to stdout. Started by bridge.js; can also be run by hand.
 #
 #   capture.ps1 -TestImage strip.png    decode a PNG once and exit (used by tests)
+#   capture.ps1 -Shot out.png           save the whole game window once and exit (the strip
+#                                       blanked out; -ShotMaxWidth scales it down)
 
 param(
   [int]$Cell = 4,
@@ -10,7 +12,9 @@ param(
   [int]$MaxRows = 48,
   [int]$IntervalMs = 250,
   [string]$ProcessName = "WowB",
-  [string]$TestImage = ""
+  [string]$TestImage = "",
+  [string]$Shot = "",
+  [int]$ShotMaxWidth = 1920
 )
 
 $ErrorActionPreference = "Continue"
@@ -23,7 +27,9 @@ public class CapWin {
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 "@
 [void][CapWin]::SetProcessDPIAware()
@@ -89,6 +95,39 @@ if ($TestImage -ne "") {
   $msg = Decode $bmp
   $bmp.Dispose()
   if ($msg) { Emit $msg } else { Emit @{ error = "no valid strip in image" } }
+  exit 0
+}
+
+if ($Shot) {
+  $p = Get-Process $ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  if (-not $p) { Emit @{ error = "no game window found" }; exit 1 }
+  $hwnd = $p.MainWindowHandle
+  if ([CapWin]::IsIconic($hwnd)) { Emit @{ error = "the game window is minimized" }; exit 1 }
+  $rc = New-Object CapWin+RECT
+  [void][CapWin]::GetClientRect($hwnd, [ref]$rc)
+  $pt = New-Object CapWin+POINT
+  [void][CapWin]::ClientToScreen($hwnd, [ref]$pt)
+  $cw = $rc.Right - $rc.Left; $ch = $rc.Bottom - $rc.Top
+  if ($cw -le 0 -or $ch -le 0) { Emit @{ error = "empty game window" }; exit 1 }
+  $bmp = New-Object System.Drawing.Bitmap $cw, $ch
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  try { $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, $bmp.Size) } catch { Emit @{ error = "capture failed: $_" }; exit 1 }
+  # The strip is there while a message waits for its ack: black it out.
+  $masked = $false
+  $m = Decode $bmp
+  if ($m) {
+    $g.FillRectangle([System.Drawing.Brushes]::Black, 0, 0, [Math]::Min($cw, $Cells * $Cell + 8), [Math]::Min($ch, $MaxRows * $Cell + 8))
+    $masked = $true
+  }
+  $g.Dispose()
+  if ($ShotMaxWidth -gt 0 -and $cw -gt $ShotMaxWidth) {
+    $nh = [int]($ch * $ShotMaxWidth / $cw)
+    $small = New-Object System.Drawing.Bitmap $bmp, $ShotMaxWidth, $nh
+    $bmp.Dispose(); $bmp = $small
+  }
+  $bmp.Save($Shot, [System.Drawing.Imaging.ImageFormat]::Png)
+  Emit @{ info = "shot $($bmp.Width)x$($bmp.Height)"; path = $Shot; masked = $masked }
+  $bmp.Dispose()
   exit 0
 }
 

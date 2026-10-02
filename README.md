@@ -17,6 +17,7 @@ Chat with your local coding agents from inside **World of Warcraft: Forever**: [
 - An **Allow & retry** button when Claude or Grok needs a command outside your allowlist
 - A status light for the bridge, automatic retries, and recovery of your chats (and map layers) if the beta client wipes addon data
 - **A model per chat** from the local opencodex catalog (GPT, Claude, DeepSeek...), picked from a list, or **Auto**: JEV picks a fast, balanced or strong model per message
+- **Your screen**: ask "what is this?" and the agent sees the game window as it was; or click **Shot**, `/ai shot <question>`, or hand it a screenshot you took (`/ai screenshot`). See [docs/SCREEN.md](docs/SCREEN.md)
 - **Voice**: press Talk (or A on the controller), speak, and the bridge transcribes it on the PC; replies to voice messages are read aloud
 - **Gamepad mode** (`/ai mando`): the controller drives the window (A talk, X apply, Y menu, d-pad scroll and chats), without touching Blizzard's gamepad code
 - **Quick orders** through JEV: "ordena las bolsas", "siguiente parada" and a few more are answered by the bridge in about half a second, with no agent run (game actions still wait for Apply). See [docs/VOICE-GAMEPAD-MODELS.md](docs/VOICE-GAMEPAD-MODELS.md)

@@ -6,6 +6,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- Screenshots for the agent: a message about the screen ("what is this?") goes with a picture of the game window, with JEV confirming it is needed. A Shot button, gamepad Back, `/ai shot <question>` and `/ai screenshot` (your newest saved screenshot) do it on demand. `/ai screen auto|always|never` sets the default. Live capture with `--shot` in the Linux, macOS and Windows capture scripts. See docs/SCREEN.md.
 - **Clear orders run without Apply.** When JEV's review finds every proposed action plainly asked for (≥ 0.85, or ≥ 0.95 for selling, abandoning quests, talents and training), the reply carries `auto` and the addon applies the actions itself. In combat they wait for combat to end; ones needing the bank, a vendor or a trainer run when it opens. Doubtful ones wait for Apply; flagged ones get (!). `/wow-ai autoapply off` in game or `jev.autoApply: false` in the bridge turns it off.
 - **Moving items:** `arrange_bags` (these items first, in this order) and `move_items` (bag:slot to bag:slot, swapping), and the `bags` game data now says where each item is (`@bag:slot`) and each bag's size.
 

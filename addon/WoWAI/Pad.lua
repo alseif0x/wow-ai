@@ -23,13 +23,14 @@ _G.BINDING_HEADER_WOWAI = "WoW AI"
 _G.BINDING_NAME_WOWAI_TOGGLE = "Show / hide the window"
 _G.BINDING_NAME_WOWAI_PAD = "Gamepad mode on / off"
 _G.BINDING_NAME_WOWAI_TALK = "Talk (hold while speaking)"
+_G.BINDING_NAME_WOWAI_SHOT = "Screenshot for the next message"
 
 local L = function(en, es) return WoWAI.L and WoWAI.L(en, es) or en end
 
 local KEYS = {
 	"PAD1", "PAD2", "PAD3", "PAD4",
 	"PADDUP", "PADDDOWN", "PADDLEFT", "PADDRIGHT",
-	"PADLSHOULDER", "PADRSHOULDER", "PADFORWARD",
+	"PADLSHOULDER", "PADRSHOULDER", "PADFORWARD", "PADBACK",
 }
 
 local HOLD_SECONDS = 0.6 -- a longer A press is push-to-talk: releasing it stops listening
@@ -79,8 +80,8 @@ local function Legend()
 		legend:SetBackdropBorderColor(1, 0.82, 0.25, 1)
 		legend.text = legend:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		legend.text:SetPoint("CENTER")
-		legend.text:SetText(L("A talk   B back   X apply   Y menu   D-pad up/down scroll, left/right chat   LB/RB page   Start exit",
-			"A hablar   B atrás   X aplicar   Y menú   Cruceta arriba/abajo desplaza, izq./der. chat   LB/RB página   Start salir"))
+		legend.text:SetText(L("A talk   B back   X apply   Y menu   Back photo   D-pad scroll / chat   LB/RB page   Start exit",
+			"A hablar   B atrás   X aplicar   Y menú   Back foto   Cruceta desplaza / chat   LB/RB página   Start salir"))
 	end
 	return legend
 end
@@ -91,6 +92,8 @@ local function Menu()
 		{ value = "agent", label = L("Agent...", "Agente...") },
 		{ value = "phrases", label = L("Quick phrases...", "Frases rápidas...") },
 		{ value = "new", label = L("New chat", "Nuevo chat") },
+		{ value = "shot", label = L("Screenshot for the next message", "Foto de la pantalla para el próximo mensaje") },
+		{ value = "saved", label = L("Send my latest screenshot", "Enviar mi última captura") },
 	}
 	if WoWAI.HasActions() then table.insert(items, { value = "discard", label = L("Discard the proposed actions", "Descartar las acciones propuestas") }) end
 	table.insert(items, { value = "last", label = L("Show the last reply in full", "Ver la última respuesta completa") })
@@ -103,6 +106,8 @@ local function Menu()
 			for _, p in ipairs(Phrases()) do table.insert(list, { value = p, label = p }) end
 			WoWAIPicker.Open(L("Say to the AI", "Decir a la IA"), list, nil, function(p) WoWAI.Send(p) end)
 		elseif v == "new" then WoWAI.NewChat()
+		elseif v == "shot" then WoWAI.ArmShot(true)
+		elseif v == "saved" then SlashCmdList["WOWAI"]("captura")
 		elseif v == "discard" then WoWAI.DiscardActions()
 		elseif v == "last" then SlashCmdList["WOWAI"]("copy")
 		elseif v == "exit" then Pad.Exit() end
@@ -156,6 +161,11 @@ local function Handle(key, down)
 		if picker then WoWAIPicker.Move(8) else WoWAI.ScrollBy(10) end
 	elseif key == "PADFORWARD" then
 		Pad.Exit()
+	elseif key == "PADBACK" then
+		-- Back / Select: the next message (A to talk) goes with a picture of the screen.
+		WoWAI.ArmShot()
+		WoWAI.Note(WoWAI.ShotArmed() and L("The next message goes with a screenshot.", "El próximo mensaje irá con una foto de la pantalla.")
+			or L("No screenshot.", "Sin foto."))
 	end
 end
 

@@ -8,4 +8,7 @@
 	<Binding name="WOWAI_TALK" runOnUp="true" category="ADDONS">
 		WoWAIPad.TalkBinding(keystate)
 	</Binding>
+	<Binding name="WOWAI_SHOT" category="ADDONS">
+		WoWAI.ArmShot()
+	</Binding>
 </Bindings>

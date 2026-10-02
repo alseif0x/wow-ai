@@ -117,8 +117,11 @@ function sameFolder(a, b) {
 // "model=gpt-6-sol" = run it on that model ("auto" = let JEV pick a tier, see
 // jev.js), "v" = a voice message: the bridge listens on the microphone and the
 // transcript becomes the text, "vs" = stop listening now (no prompt).
+// Screenshots (screen.js): "s" = attach the game window as it is now, "sk" = the
+// text talks about the screen (take it now, JEV decides), "sf" = attach the newest
+// saved screenshot, "sn" = never. No flag = auto: JEV decides, the bridge takes it then.
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '', model: '', voice: false, voiceStop: false };
+  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '', model: '', voice: false, voiceStop: false, shot: '' };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
@@ -126,6 +129,7 @@ function parseFlags(flags) {
     else if (tok === 'c') out.context = true;
     else if (tok === 'v') out.voice = true;
     else if (tok === 'vs') out.voiceStop = true;
+    else if (tok === 's' || tok === 'sk' || tok === 'sf' || tok === 'sn') out.shot = tok;
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
     else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
     else if (tok.startsWith('model=')) out.model = cleanModel(tok.slice(6));
@@ -378,6 +382,8 @@ function luaTable(globalName, records, opts = {}) {
     if (r.prefetch) lines.push('\t\t\tprefetch = true,');
     // The actions were plainly asked for: the addon applies them without the click.
     if (r.auto) lines.push('\t\t\tauto = true,');
+    // The agent saw the game window (or a saved screenshot) with the question.
+    if (r.shot) lines.push(`\t\t\tshot = ${luaStr(r.shot)},`);
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }

@@ -8,6 +8,8 @@ Zero dependencies: python3 + ctypes against libX11.
 
   capture_x11.py --test-image strip.png   decode a PNG once and exit (tests)
   capture_x11.py --probe out.png          save what the capture sees once and exit
+  capture_x11.py --shot out.png           save the whole game window once and exit (the strip
+                                          blanked out); --shot-max-width scales it down
   capture_x11.py --window-name NAME       match a window by title instead of WM_CLASS
   capture_x11.py --source window          read the game window itself (Xwayland); default auto
 """
@@ -36,6 +38,8 @@ p.add_argument("--source", choices=("auto", "root", "window"), default="auto",
                     "itself, or try the root and fall back to the window when it fails (Xwayland)")
 p.add_argument("--test-image", default="")
 p.add_argument("--probe", default="")
+p.add_argument("--shot", default="")
+p.add_argument("--shot-max-width", type=int, default=1920)
 args = p.parse_args()
 
 CELL, CELLS, MAXROWS = args.cell, args.cells, args.max_rows
@@ -443,7 +447,107 @@ def grab(w):
     return px, width, height
 
 
+def full_region(w, a, src):
+    """(drawable, x0, y0, width, height) of the whole game window in source src."""
+    if src == "window":
+        return w, 0, 0, a.width, a.height
+    rx, ry, child = ctypes.c_int(), ctypes.c_int(), Window()
+    before = x_errors[0]
+    X.XTranslateCoordinates(dpy, w, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child))
+    ra = attrs(root)
+    if x_errors[0] != before or not ra:
+        return None
+    x0, y0 = max(0, rx.value), max(0, ry.value)
+    return root, x0, y0, min(a.width, ra.width - x0), min(a.height, ra.height - y0)
+
+
+def shot(path, max_width):
+    """The whole game window as a PNG, fast: the pixel buffer is reordered in bulk
+    (no per-pixel Python), the WoWAI strip is blanked when it is on screen, and the
+    picture is scaled down by a whole factor to at most max_width."""
+    w = find_window()
+    if not w:
+        return {"error": "no game window found"}
+    a = attrs(w)
+    if not a or a.map_state != IS_VIEWABLE:
+        return {"error": "the game window is not on screen (minimized?)"}
+    img = None
+    for src in ([args.source] if args.source != "auto" else ["root", "window"]):
+        region = full_region(w, a, src)
+        if not region or region[3] <= 0 or region[4] <= 0:
+            continue
+        drawable, x0, y0, gw, gh = region
+        before = x_errors[0]
+        img = X.XGetImage(dpy, drawable, x0, y0, gw, gh, ALL_PLANES, ZPIXMAP)
+        X.XSync(dpy, 0)
+        if img and x_errors[0] == before:
+            break
+        img = None
+    if not img:
+        return {"error": "capture failed"}
+    im = img.contents
+    try:
+        if im.bits_per_pixel != 32:
+            return {"error": "unsupported pixel format: %d bpp" % im.bits_per_pixel}
+        width, height, stride = im.width, im.height, im.bytes_per_line
+        buf = ctypes.string_at(im.data, stride * height)
+        masks = (im.red_mask, im.green_mask, im.blue_mask)
+        little = im.byte_order == 0
+    finally:
+        destroy = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(XImage))(im.destroy_image)
+        destroy(img)
+    if stride != width * 4:
+        buf = b"".join(buf[y * stride:y * stride + width * 4] for y in range(height))
+    # Byte position of each channel in a 4-byte pixel.
+    def pos(mask):
+        shift = mask_shift(mask)[0] // 8
+        return shift if little else 3 - shift
+    ri, gi, bi = (pos(m) for m in masks)
+    rgb = bytearray(width * height * 3)
+    rgb[0::3], rgb[1::3], rgb[2::3] = buf[ri::4], buf[gi::4], buf[bi::4]
+    # The strip is there while a message waits for its ack: black it out.
+    rowlen = width * 3
+
+    def px(x, y):
+        o = y * rowlen + x * 3
+        return rgb[o], rgb[o + 1], rgb[o + 2]
+    masked = False
+    try:
+        msg, _ = find_and_decode(px, min(width, W + SLACK), min(height, H + SLACK), None)
+    except Exception:
+        msg = None
+    if msg is not None:
+        blank = bytes(min(width, W + SLACK) * 3)
+        for y in range(min(height, H + SLACK)):
+            rgb[y * rowlen:y * rowlen + len(blank)] = blank
+        masked = True
+    k = max(1, -(-width // max_width)) if max_width > 0 else 1
+    if k > 1:
+        ow, oh = width // k, height // k
+        out = bytearray(ow * oh * 3)
+        for y in range(oh):
+            row = rgb[y * k * rowlen:y * k * rowlen + ow * k * 3]
+            o = y * ow * 3
+            for c in range(3):
+                out[o + c:o + ow * 3:3] = row[c::3 * k]
+        rgb, width, height, rowlen = out, ow, oh, ow * 3
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    raw = b"".join(b"\0" + bytes(rgb[y * rowlen:(y + 1) * rowlen]) for y in range(height))
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(raw, 3)) + chunk(b"IEND", b""))
+    os.replace(tmp, path)
+    return {"info": "shot %dx%d" % (width, height), "path": path, "width": width, "height": height, "masked": masked}
+
+
 def run():
+    if args.shot:
+        r = shot(args.shot, args.shot_max_width)
+        emit(r)
+        sys.exit(1 if "error" in r else 0)
     if args.probe:
         w = find_window()
         if not w:

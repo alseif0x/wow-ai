@@ -94,8 +94,18 @@ const NEEDS = {
   macros: 'the player\'s macros',
 };
 
+const SCREEN_INSTRUCTIONS = 'The player of World of Warcraft sent `message` from inside the game. Would a picture of '
+  + 'their game screen right now help answer it: does it point at something they are looking at (a window, a tooltip, '
+  + 'an item, an NPC, the map, an error, "this", "here", "what I see")?';
+
 function analyzeRequest(text, opts = {}) {
   const questions = {};
+  if (opts.screen) {
+    questions.screen = {
+      type: 'noul', instructions: SCREEN_INSTRUCTIONS,
+      criteria: { true: 'The answer depends on what is on their screen right now.', false: 'The message can be answered without seeing their screen.' },
+    };
+  }
   if (opts.route) {
     const criteria = { agent: AGENT_CRITERIA };
     for (const [id, q] of Object.entries(QUICK)) criteria[id] = q.criteria;
@@ -217,18 +227,19 @@ const DEFAULT_TIERS = { fast: 'gpt-6-luna--fast', balanced: 'gpt-6-sol', strong:
 
 // Everything JEV can tell about one message, from one request:
 //   { quick?: { intent, confidence, es, actions?, cmds? },
-//     tier?: { tier, score, model, note? }, needs: [kinds], ms, note? }
-// opts.route / opts.tier / opts.needs say which questions to ask.
+//     tier?: { tier, score, model, note? }, needs: [kinds], screen?: 0..1, ms, note? }
+// opts.route / opts.tier / opts.needs / opts.screen say which questions to ask.
 async function analyze(cfg, text, opts = {}) {
   const out = { needs: [] };
   if (!cfg || cfg.enabled === false) return { ...out, note: 'off' };
   const route = !!opts.route && cfg.router !== false && routable(text);
   const tier = !!opts.tier;
   const needs = !!opts.needs && cfg.prefetch !== false && !/^\[(game data|actions)\]/i.test(String(text).trim());
-  if (!route && !tier && !needs) return { ...out, note: 'nothing to ask' };
+  const screen = !!opts.screen;
+  if (!route && !tier && !needs && !screen) return { ...out, note: 'nothing to ask' };
   const models = { ...DEFAULT_TIERS, ...(cfg.tiers || {}) };
   const fallbackTier = cfg.fallbackTier || 'balanced';
-  const r = await decide(cfg, analyzeRequest(text, { route, tier, needs }), cfg.timeoutMs || cfg.routerTimeoutMs || 2500);
+  const r = await decide(cfg, analyzeRequest(text, { route, tier, needs, screen }), cfg.timeoutMs || cfg.routerTimeoutMs || 2500);
   out.ms = r.ms;
   if (tier) out.tier = { tier: fallbackTier, model: models[fallbackTier] || '' };
   if (r.error) { out.note = r.error; if (tier) out.tier.note = r.error; return out; }
@@ -248,6 +259,10 @@ async function analyze(cfg, text, opts = {}) {
       const name = TIER_NAMES[level];
       out.tier = { tier: name, score: s.score, confidence: s.confidence, model: models[name] || models[fallbackTier] || '' };
     } else out.tier.note = 'unexpected difficulty answer';
+  }
+  if (screen) {
+    const v = readNoul(r.json, 'screen');
+    if (v !== null) out.screen = v;
   }
   if (needs) {
     const min = cfg.needThreshold || 0.8;

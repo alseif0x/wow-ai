@@ -453,3 +453,42 @@ test('gamepad mode binds the controller to the window and gives it back', () => 
   vm.run('SlashCmdList.WOWAI("macros")');
   assert.equal(vm.num('#STUB.macros'), 2, 'not made twice');
 });
+
+test('screenshots: the flag each way of asking sends, and the reply says the agent saw it', () => {
+  const vm = connected();
+  const flagsOf = () => { const r = stripRecords(vm); return r[0] ? r[0].flags.split(';') : []; };
+  const flush = (text) => {
+    const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+    const id = vm.num('WoWAIDB.chats[1].pendingId');
+    vm.run(`STUB.onLoadAddOn = function() WoWAI_SlotData = ${SLOT(`{ chat = "${chatId}", id = ${id}, status = "done", text = "${text}", agent = "claude", shot = "live" }`)} end`);
+    vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  };
+  // Auto (the default): a message that talks about the screen says so; others carry nothing.
+  vm.run('WoWAI.Send("¿qué es esto?")');
+  assert.ok(flagsOf().includes('sk'));
+  flush('Es una gema');
+  assert.match(vm.evaluate(`${last}.text`), /vio tu pantalla|saw your screen/);
+  vm.run('WoWAI.Send("ordena las bolsas")');
+  assert.ok(!flagsOf().some(f => /^s[kfn]?$/.test(f)), flagsOf().join(';'));
+  flush('ok');
+  // The camera button arms the next message only.
+  vm.run('WoWAI.ArmShot(true)');
+  assert.equal(vm.evaluate('WoWAI.ShotArmed()'), 'true');
+  vm.run('WoWAI.Send("ayúdame")');
+  assert.ok(flagsOf().includes('s'));
+  assert.equal(vm.evaluate('WoWAI.ShotArmed()'), 'false');
+  assert.equal(vm.evaluate(`(function() for _, m in ipairs(WoWAIDB.chats[1].history) do if m.role == "user" and m.text == "ayúdame" then return m.shot end end end)()`), 's');
+  flush('ok');
+  // /ai foto <question>, /ai captura, and /ai pantalla nunca.
+  vm.run('SlashCmdList.WOWAI("foto qué hago con esto")');
+  assert.ok(flagsOf().includes('s'));
+  flush('ok');
+  vm.run('SlashCmdList.WOWAI("captura")');
+  assert.ok(flagsOf().includes('sf'));
+  assert.match(stripRecords(vm)[0].text, /captura|screenshot/i);
+  flush('ok');
+  vm.run('SlashCmdList.WOWAI("pantalla nunca")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.screen'), 'never');
+  vm.run('WoWAI.Send("¿qué es esto?")');
+  assert.ok(flagsOf().includes('sn'));
+});

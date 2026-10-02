@@ -33,6 +33,8 @@ p.add_argument("--process-name", default="World of Warcraft")
 p.add_argument("--window-name", default="")
 p.add_argument("--test-image", default="")
 p.add_argument("--probe", default="")
+p.add_argument("--shot", default="", help="save the whole game window to this PNG once and exit")
+p.add_argument("--shot-max-width", type=int, default=1920)
 # macOS specific: how many pixels to search down for the strip (title bar + menu bar)
 p.add_argument("--y-slack", type=int, default=80, help="vertical search margin in physical pixels")
 # region to capture, in screen points (independent of Retina scale)
@@ -298,7 +300,28 @@ def grab(out_path):
     return read_png(out_path)
 
 
+def shot(path, max_width):
+    """The whole game window, by screencapture (native, fast), scaled down with sips
+    (Retina captures are twice the size). The strip is not blanked out here: it sits
+    in the top-left corner while a message waits for its ack."""
+    bounds = find_window_bounds()
+    if not bounds:
+        return {"error": "no game window found"}
+    x, y, ww, wh = bounds
+    try:
+        capture_region(x, y, ww, wh, path)
+    except Exception as e:
+        return {"error": "screencapture failed: %s" % e}
+    if max_width > 0:
+        subprocess.run(["sips", "--resampleWidth", str(max_width), path], capture_output=True, timeout=10)
+    return {"info": "shot of %dx%d points" % (ww, wh), "path": path, "masked": False}
+
+
 def run():
+    if args.shot:
+        r = shot(args.shot, args.shot_max_width)
+        emit(r)
+        sys.exit(1 if "error" in r else 0)
     if args.probe:
         fd, tmp = tempfile.mkstemp(suffix=".png")
         os.close(fd)

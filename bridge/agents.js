@@ -346,8 +346,11 @@ const AGENTS = {
     install: 'https://claude.com/claude-code, then run `claude` once and log in',
     windowsPaths: () => [path.join(os.homedir(), '.local', 'bin', 'claude.exe')],
     posixPaths: () => [path.join(os.homedir(), '.local', 'bin', 'claude')],
-    args({ cfg, resume, system }) {
+    args({ cfg, resume, system, images }) {
       const a = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', cfg.permissionMode || 'acceptEdits'];
+      // Screenshots live outside the run's folder: let its Read tool open them.
+      const dirs = [...new Set((images || []).filter((i) => !String(i).startsWith('-')).map((i) => path.dirname(String(i))))];
+      for (const d of dirs) a.push('--add-dir', d);
       const rules = Array.isArray(cfg.allowedTools) ? cfg.allowedTools.filter(Boolean) : [];
       if (rules.length) a.push('--allowedTools', ...rules);
       const denied = Array.isArray(cfg.deniedTools) ? cfg.deniedTools.filter(Boolean) : [];

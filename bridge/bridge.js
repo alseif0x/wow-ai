@@ -19,6 +19,8 @@
 //   --agent <id>      agent for --inject (default: "agent" in config.json)
 //   --model <id>      model for --inject (an opencodex id, or "auto")
 //   --voice           with --inject "": listen on the microphone for the message
+//   --shot <flag>     with --inject: a screenshot flag (s, sk, sf, sn; see screen.js)
+//   --window-name <t> capture the window with this title instead of the game's (tests)
 //   --project <dir>   default folder for chats that haven't picked one
 //
 // Like the agent CLIs themselves, the bridge works in the folder it was started
@@ -32,6 +34,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
+const S = require('./screen');   // screenshots for the agent (docs/SCREEN.md)
 const J = require('./jev');      // quick orders and "auto" model tiers through JEV (docs/JEV.md)
 const V = require('./voice');    // microphone, speech-to-text and read-aloud (docs/VOICE.md)
 
@@ -63,6 +66,9 @@ const injectAgent = agentIdx >= 0 ? argv[agentIdx + 1] : '';
 const modelIdx = argv.indexOf('--model');
 const injectModel = modelIdx >= 0 ? P.cleanModel(argv[modelIdx + 1]) : '';
 const injectVoice = argv.includes('--voice'); // --inject "" --voice: listen on the microphone instead
+const shotIdx = argv.indexOf('--shot');
+const injectShot = shotIdx >= 0 ? (P.parseFlags(argv[shotIdx + 1]).shot || '') : '';
+const winIdx = argv.indexOf('--window-name');
 const exitWhenIdle = once || inject !== null;
 
 // The agent chats use unless they pick their own (/wow-ai agent, "agent=" flag).
@@ -107,7 +113,11 @@ const voice = new V.Voice(cfg, path.join(HERE, 'tmp'), (...a) => log(...a));
 
 const SLOTS = cfg.slots || 200;
 const MAX_PARALLEL = cfg.maxParallel || 3;
+// Screenshots for the agent (screen.js, docs/SCREEN.md).
+const SCREEN = Object.assign({ enabled: true, maxWidth: 1920, keep: 30, threshold: 0.6, autoThreshold: 0.8, folders: [] }, cfg.screen || {});
+const SHOT_DIR = path.join(HERE, 'tmp', 'shots');
 const cap = Object.assign({ enabled: true, processName: 'WowB', cellPx: 4, cellsPerRow: 200, maxRows: 48, intervalMs: 250 }, cfg.capture || {});
+if (winIdx >= 0) cap.windowName = argv[winIdx + 1];
 // The game-side files. A config.json written for the addon's old name
 // (WoWClaude) still works: the paths are derived from addonDir instead.
 const INBOX_FILE = cfg.inboxFile && !/WoWClaude/.test(cfg.inboxFile) ? cfg.inboxFile : path.join(cfg.addonDir || '', 'WoWAI', 'Inbox.lua');
@@ -539,6 +549,7 @@ function submit(job) {
   if (cur && cur.job.id === job.id) return;
   const q = queued.get(key);
   if (q && q.id === job.id) return;
+  prepareShots(job);
   if (cur || running.size >= MAX_PARALLEL) {
     queued.set(key, job);
     log(`#${job.id}${job.session ? '@' + job.session : ''} queued (${cur ? 'chat busy' : running.size + ' running'})`);
@@ -548,6 +559,51 @@ function submit(job) {
 }
 
 const listening = new Set(); // "session:id" of voice messages already listened to (the latest 200)
+
+// Screenshots, when the message comes in (the screen is what the player saw as they
+// sent it, and the addon hides its own window for a moment): "s" always, "sk" and an
+// auto message (no flag) whose text points at the screen tentatively (JEV confirms in
+// analyzeJob); "sn" never. Game data and action reports are the addon's, not questions.
+function shotAuto(job) {
+  return !job.shot && !/^\[(game data|actions)\]/i.test(String(job.text || '').trim());
+}
+
+function prepareShots(job) {
+  if (job.shotsPrepared || !SCREEN.enabled || job.shot === 'sn') return;
+  job.shotsPrepared = true;
+  const tag = `#${job.id}`;
+  if (job.shot === 'sf' || S.refersToSaved(job.text)) {
+    const f = S.latestSaved(S.savedFolders(cfg.addonDir, SCREEN.folders));
+    if (f) { job.savedShot = f; log(`${tag} screenshot: the newest saved one, ${f}`); }
+    else log(`${tag} screenshot: asked for a saved one, but none found`);
+  }
+  // Asking about a saved screenshot ("mi última captura de pantalla") is not about the screen now.
+  if (job.shot === 's' || (!job.savedShot && (job.shot === 'sk' || (shotAuto(job) && S.refersToScreen(job.text))))) {
+    job.shotLive = job.shot === 's' ? 'yes' : 'maybe';
+    job.shotPromise = liveShot(job);
+  }
+}
+
+function liveShot(job) {
+  return S.takeShot({ cap, here: HERE, dir: SHOT_DIR, id: job.id, maxWidth: SCREEN.maxWidth }).then((r) => {
+    if (r.error) { log(`#${job.id} screenshot failed: ${r.error}`); return null; }
+    log(`#${job.id} screenshot: ${r.info}`);
+    S.prune(SHOT_DIR, SCREEN.keep);
+    return r.path;
+  });
+}
+
+// Before the run: the pictures that go with it.
+async function resolveShots(job) {
+  const images = [];
+  if (job.shotPromise && job.shotLive !== 'no') {
+    const p = await job.shotPromise;
+    if (p) images.push(p);
+  }
+  if (job.savedShot) images.push(job.savedShot);
+  job.images = images;
+  job.shotKind = images.length ? (job.savedShot && images.length === 1 ? 'saved' : 'live') : '';
+}
 
 // Record, transcribe, and put the transcript in job.text. false when there is
 // nothing to run (the reply already says why).
@@ -631,8 +687,8 @@ async function startJob(job) {
   const key = chatKey(job);
   running.set(key, { job, child: null });
   try {
-    if (mergePrefetched(job)) { runJob(job); return; }
-    await analyzeJob(job);
+    if (!mergePrefetched(job)) await analyzeJob(job);
+    if (!job.finished) await resolveShots(job);
   } catch (e) { log(`#${job.id} before the run: ${e.stack || e.message}`); }
   if (job.finished) return;
   runJob(job);
@@ -648,7 +704,7 @@ function mergePrefetched(job) {
   if (!/^\[game data\]/i.test(String(job.text || '').trim())) return false;
   prefetched.delete(key);
   job.text = `${q.text}\n\n${job.text}`;
-  for (const k of ['heard', 'voice', 'model', 'modelUsed']) if (q[k] !== undefined) job[k] = q[k];
+  for (const k of ['heard', 'voice', 'model', 'modelUsed', 'shotPromise', 'shotLive', 'savedShot']) if (q[k] !== undefined) job[k] = q[k];
   job.prefetched = true;
   log(`#${job.id} game data for #${q.id} arrived (${q.needs.join(', ')}): running the question with it`);
   return true;
@@ -658,8 +714,20 @@ async function analyzeJob(job) {
   const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
   const plain = !job.newSession && !(Array.isArray(job.allow) && job.allow.length);
   const wantTier = job.model === 'auto';
-  if (!JEV.enabled || (!plain && !wantTier)) { job.modelUsed = wantTier ? '' : (job.model || ''); return; }
-  const a = await J.analyze(JEV, job.text, { route: plain, tier: wantTier, needs: plain && JEV.prefetch !== false });
+  const wantScreen = SCREEN.enabled && (job.shotLive === 'maybe' || (shotAuto(job) && !job.shotLive && !job.savedShot));
+  if (!JEV.enabled || (!plain && !wantTier && !wantScreen)) { job.modelUsed = wantTier ? '' : (job.model || ''); return; }
+  const a = await J.analyze(JEV, job.text, { route: plain, tier: wantTier, needs: plain && JEV.prefetch !== false, screen: wantScreen });
+  if (wantScreen && a.screen !== undefined) {
+    if (job.shotLive === 'maybe') {
+      // The words pointed at the screen; JEV says whether the picture helps.
+      job.shotLive = a.screen >= SCREEN.threshold ? 'yes' : 'no';
+    } else if (a.screen >= SCREEN.autoThreshold) {
+      // Nothing in the words, but JEV thinks it is about the screen: take it now.
+      job.shotLive = 'yes';
+      job.shotPromise = liveShot(job);
+    }
+    log(`${tag} jev screen ${a.screen.toFixed(2)} -> ${job.shotLive === 'yes' ? 'with a screenshot' : 'no screenshot'}`);
+  }
   const parts = [];
   if (a.quick) parts.push(`quick order ${a.quick.intent} ${a.quick.confidence.toFixed(2)}`);
   else if (a.intent) parts.push(`intent ${a.intent}`);
@@ -698,7 +766,8 @@ function askGameData(job, needs) {
   job.cwd = resolveCwd(job.cwd);
   signal('ack', job.id, true);
   maybeOfferRestore(job);
-  prefetched.set(key, { id: job.id, text: job.text, heard: job.heard, voice: job.voice, model: job.model, modelUsed: job.modelUsed, needs, at: Date.now() });
+  prefetched.set(key, { id: job.id, text: job.text, heard: job.heard, voice: job.voice, model: job.model, modelUsed: job.modelUsed,
+    shotPromise: job.shotPromise, shotLive: job.shotLive, savedShot: job.savedShot, needs, at: Date.now() });
   job.agent = 'jev';
   finish(job, 'done', `Reuniendo datos del juego: ${needs.join(', ')}.`, '', [], { need: needs, actions: [], prefetch: true, quiet: true });
 }
@@ -792,14 +861,15 @@ function runJob(job) {
   const system = P.systemPrompt(ctx, primer());
   const systemShort = P.systemPrompt(ctx, '');
   const promptFile = path.join(TMP_DIR, `prompt-${job.id}-${Date.now().toString(36)}.txt`);
-  const input = agent.input({ prompt: job.text, system, systemShort, resume, cfg: acfg });
+  const images = Array.isArray(job.images) ? job.images : [];
+  const input = agent.input({ prompt: job.text, system, systemShort, resume, cfg: acfg, images });
   if (input.promptFile !== undefined) {
     try { fs.mkdirSync(TMP_DIR, { recursive: true }); fs.writeFileSync(promptFile, input.promptFile); }
     catch (e) { finish(job, 'error', `Could not write the prompt file ${promptFile}: ${e.message}`); return; }
   }
   const args = [...cmd.args, ...agent.args({
     cfg: acfg, resume, cwd, system, systemShort, promptFile,
-    prompt: job.text, timeoutMs: cfg.timeoutMs,
+    prompt: job.text, timeoutMs: cfg.timeoutMs, images,
   })];
   const env = agent.env({ ...process.env });
   // Where this run's tools append map commands (docs/MAP.md); any agent can use it.
@@ -809,7 +879,7 @@ function runJob(job) {
     env.WOW_AI_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
-  log(`${tag} (${job.via}) ${agent.name}${acfg.model ? ' on ' + acfg.model + (viaOcx ? ' via ocx' : '') : ''} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size > 1 ? ' [' + running.size + ' running]' : ''}`);
+  log(`${tag} (${job.via}) ${agent.name}${acfg.model ? ' on ' + acfg.model + (viaOcx ? ' via ocx' : '') : ''} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${images.length ? ' [' + images.length + ' screenshot' + (images.length > 1 ? 's' : '') + ']' : ''}${running.size > 1 ? ' [' + running.size + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
   publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId, heard: job.heard, model: job.modelShown }, true);
@@ -958,7 +1028,8 @@ function finish(job, status, text, session, denied, game = {}) {
   if (!game.quiet) noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
   const need = game.need || [], actions = game.actions || [], cmds = game.cmds || [];
   publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '', need, actions,
-    heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch, auto: !!game.auto && actions.length > 0 }, true);
+    heard: job.heard, model: job.modelShown || '', cmds, prefetch: !!game.prefetch, auto: !!game.auto && actions.length > 0,
+    shot: game.prefetch ? '' : (job.shotKind || '') }, true);
   signal('sig', job.id, true);
   // A reply to a voice message is read aloud (voice.speak in config.json).
   if (status === 'done' && !game.quiet && voice.enabled && voice.shouldSpeak(job)) voice.speak(summary || text);
@@ -1059,7 +1130,7 @@ function banner() {
 
 banner();
 if (inject !== null) {
-  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '', model: injectModel, voice: injectVoice });
+  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '', model: injectModel, voice: injectVoice, shot: injectShot });
 } else {
   pollSavedVariables();
   if (once) {

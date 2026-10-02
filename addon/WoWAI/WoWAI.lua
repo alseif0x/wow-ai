@@ -224,6 +224,7 @@ local function InitDB()
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
 	if s.autoApply == nil then s.autoApply = true end -- clear orders run without the Apply click
+	if s.screen == nil then s.screen = "auto" end -- screenshots for the agent: auto, always or never (docs/SCREEN.md)
 	-- How much of each reply to print in the game chat. "summary" (the agent's
 	-- closing TL;DR lines) replaced "full" as the default; an install that still
 	-- has the old default saved moves over once, any other choice is kept.
@@ -779,7 +780,10 @@ local function ApplyReplies(replies)
 					C_Timer.After(0.2, function() WoWAI.SendGameData(c.id, need, true) end)
 				else
 					RunQuickCommands(r.cmds)
-					Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, actions, need, r.model, r.auto and actions ~= nil, WoWAI.CleanMacros(r.macros))
+					local body = r.text or ""
+					if r.shot == "live" then body = "|cff888888[" .. L("saw your screen", "vio tu pantalla") .. "]|r\n" .. body
+					elseif r.shot == "saved" then body = "|cff888888[" .. L("saw your screenshot", "vio tu captura") .. "]|r\n" .. body end
+					Finish(c, "assistant", body, denied, r.agent, r.summary, actions, need, r.model, r.auto and actions ~= nil, WoWAI.CleanMacros(r.macros))
 				end
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
@@ -985,7 +989,7 @@ local QUEUE_MAX = 10
 local function SendNextQueued(chat)
 	while chat.queue and #chat.queue > 0 and not chat.pendingId and WoWAI.IsConnected() do
 		local q = table.remove(chat.queue, 1)
-		WoWAI.Send(q.text, q.allow, { chat = chat.id })
+		WoWAI.Send(q.text, q.allow, { chat = chat.id, shot = q.shot, savedShot = q.savedShot })
 	end
 	WoWAI.Render()
 end
@@ -1310,6 +1314,58 @@ end
 -- transcript shows instead of the text (the game data the addon sends on its own);
 -- opts.data: this is such a send, not something the player typed; opts.voice: a
 -- voice message: the text is empty and the bridge listens on the microphone.
+-- Screenshots for the agent (docs/SCREEN.md). The bridge takes the picture when the
+-- message arrives; this decides which flag goes with it:
+--   s  attach one (the camera button, /ai foto, or the "always" setting)
+--   sk the text talks about the screen ("qué es esto", "this window"): take it, JEV confirms
+--   sf the newest saved screenshot (/ai captura, "mi última captura")
+--   sn never (the "never" setting)
+-- No flag is "auto": JEV decides from the text, and the bridge takes it then.
+local SCREEN_WORDS = { "pantalla", "veo", "ves", "esto", "esta", "este", "eso", "esa", "ese", "aquí", "aqui", "ahí", "ahi",
+	"ventana", "tooltip", "mira", "screen", "this", "that", "see", "look", "here", "window" }
+local function MentionsScreen(text)
+	local t = " " .. (text:lower():gsub("[%p%c]", " ")) .. " "
+	for _, w in ipairs(SCREEN_WORDS) do
+		if t:find(" " .. w .. " ", 1, true) then return true end
+	end
+	return false
+end
+
+local function ShotFlag(text, opts)
+	if opts.data then return nil end
+	if opts.savedShot then return "sf" end
+	local mode = db.settings.screen or "auto"
+	if opts.shot or mode == "always" then return "s" end
+	if mode == "never" then return "sn" end
+	if not opts.voice and MentionsScreen(text) then return "sk" end
+	return nil
+end
+
+-- Out of the picture for a moment: the bridge reads the message off the strip within
+-- a quarter of a second and takes the shot right away.
+local function HideForShot()
+	local frames = { ui.frame, ui.mini }
+	for _, fr in ipairs(frames) do
+		if fr and fr:IsShown() then fr:SetAlpha(0) end
+	end
+	C_Timer.After(1.5, function()
+		for _, fr in ipairs(frames) do if fr then fr:SetAlpha(1) end end
+	end)
+end
+
+function WoWAI.ArmShot(on)
+	if on == nil then on = not run.shotArmed end
+	run.shotArmed = on or nil
+	WoWAI.UpdateShotButton()
+end
+
+function WoWAI.ShotArmed() return run.shotArmed and true or false end
+
+function WoWAI.UpdateShotButton()
+	if not ui.shot then return end
+	ui.shot:SetText(run.shotArmed and L("Shot: on", "Foto: sí") or L("Shot", "Foto"))
+end
+
 function WoWAI.Send(text, allow, opts)
 	opts = opts or {}
 	local c = opts.chat and FindChat(opts.chat) or ActiveChat()
@@ -1330,7 +1386,8 @@ function WoWAI.Send(text, allow, opts)
 				AddHistory(c, "system", L("The queue is full (" .. QUEUE_MAX .. " messages). Wait for a reply, or /wow-ai queue clear.",
 					"La cola está llena (" .. QUEUE_MAX .. " mensajes). Espera a una respuesta, o /wow-ai cola vaciar."))
 			else
-				table.insert(c.queue, { text = text, allow = allow })
+				table.insert(c.queue, { text = text, allow = allow, shot = opts.shot or run.shotArmed, savedShot = opts.savedShot })
+				if run.shotArmed then WoWAI.ArmShot(false) end
 			end
 			WoWAI.Render()
 			return
@@ -1396,6 +1453,9 @@ function WoWAI.Send(text, allow, opts)
 	local tokens = ChatTokens(c)
 	if c.resetNext then table.insert(tokens, 1, "n") end
 	if opts.voice then table.insert(tokens, "v") end
+	if run.shotArmed and not opts.data then opts.shot = true WoWAI.ArmShot(false) end
+	local shot = db.settings.mode == "pixel" and ShotFlag(text, opts) or nil
+	if shot then table.insert(tokens, shot) end
 	local allowHex
 	if type(allow) == "table" and #allow > 0 then
 		table.insert(tokens, "allow=" .. table.concat(allow, ","))
@@ -1422,6 +1482,7 @@ function WoWAI.Send(text, allow, opts)
 	c.progress = nil
 	AddHistory(c, opts.data and "system" or "user", shown, id)
 	if opts.voice then c.history[#c.history].voice = true end
+	if shot == "s" or shot == "sf" then c.history[#c.history].shot = shot end
 	run.userScrolled = nil
 	-- A chat still carrying its default name takes its title from the first message
 	-- you send (system notes like "/wow-ai cd" before it don't count).
@@ -1436,6 +1497,7 @@ function WoWAI.Send(text, allow, opts)
 
 	if db.settings.mode == "pixel" then
 		run.outbound[id] = { chat = c.id, cwd = c.cwd, flags = flags, name = c.name, text = text, ctx = ctx, sentAt = GetTime() }
+		if (shot == "s" or shot == "sk") and not opts.voice then HideForShot() end
 		run.sentAt = GetTime()
 		run.polls = 0
 		StartActivity(c, id)
@@ -3056,6 +3118,19 @@ local function BuildUI()
 	talk:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	ui.talk = talk
 
+	-- Screenshot for the next message (docs/SCREEN.md).
+	local shotBtn = MakeButton(f, L("Shot", "Foto"), 80, function() WoWAI.ArmShot() end)
+	shotBtn:SetPoint("LEFT", talk, "RIGHT", 6, 0)
+	shotBtn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(L("Show the AI your screen", "Enséñale tu pantalla a la IA"))
+		GameTooltip:AddLine(L("The next message (typed or spoken) goes with a picture of the game as it is then; this window steps aside for it. Messages that talk about the screen (\"what is this?\") get one on their own: /ai screen auto|always|never. /ai screenshot sends your newest saved screenshot.",
+			"El próximo mensaje (escrito o hablado) va con una imagen del juego tal como está; esta ventana se aparta un momento. Los mensajes que hablan de la pantalla (\"¿qué es esto?\") la llevan solos: /ai pantalla auto|siempre|nunca. /ai captura envía tu última captura guardada."), 0.8, 0.8, 0.8, true)
+		GameTooltip:Show()
+	end)
+	shotBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	ui.shot = shotBtn
+
 	-- A named, always-present button so a keybinding can click it (see /wow-ai bind).
 	local hotkey = CreateFrame("Button", "WoWAIRefreshButton", UIParent)
 	hotkey:SetSize(1, 1)
@@ -3246,6 +3321,9 @@ local HELP = table.concat({
 	"/wow-ai pad [on|off] | mando   gamepad mode: the controller drives this window (A talk, B back, X apply, Y menu, d-pad scroll and chats)",
 	"/wow-ai macros                 create the \"IA Voz\" and \"IA Mando\" macros, to put on a (gamepad) action bar",
 	"/wow-ai autoapply [on|off] | autoaplicar   clear orders run without the Apply click (on by default); off = every action waits for Apply",
+	"/wow-ai shot [question] | foto  ask with a picture of the game screen (alone: the next message takes one; also the Shot button)",
+	"/wow-ai screenshot [question] | captura   ask about your newest saved screenshot (the game's Screenshots folder or the desktop's)",
+	"/wow-ai screen auto|always|never | pantalla   when messages carry a screenshot on their own (auto: when they talk about the screen)",
 }, "\n")
 
 -- What each subcommand accepts, so that free text which happens to start with
@@ -3300,6 +3378,9 @@ local COMMAND_ARGS = {
 	voice = { [""] = true, stop = true }, voz = { [""] = true, stop = true, para = true },
 	pad = { [""] = true, on = true, off = true }, mando = { [""] = true, on = true, off = true },
 	macros = 0,
+	foto = true, shot = true, captura = true, screenshot = true,
+	pantalla = { [""] = true, auto = true, siempre = true, nunca = true, always = true, never = true },
+	screen = { [""] = true, auto = true, always = true, never = true, siempre = true, nunca = true },
 	autoapply = { [""] = true, on = true, off = true }, autoaplicar = { [""] = true, on = true, off = true },
 	macro = { undo = true }, -- /wow-ai macro undo; "/ai macro for my warrior" still goes to the agent
 }
@@ -3559,6 +3640,20 @@ SlashCmdList["WOWAI"] = function(msg)
 		WoWAI.Toggle(true)
 	elseif cmd == "macros" then
 		if WoWAIPad then WoWAIPad.MakeMacros() end
+	elseif cmd == "foto" or cmd == "shot" then
+		-- With a question: ask it with a picture of the screen now. Alone: the next message takes one.
+		if rest ~= "" then WoWAI.Toggle(true) WoWAI.Send(rest, nil, { shot = true }) else WoWAI.ArmShot(true) WoWAI.Toggle(true) end
+	elseif cmd == "captura" or cmd == "screenshot" then
+		WoWAI.Toggle(true)
+		WoWAI.Send(rest ~= "" and rest or L("Look at my latest screenshot.", "Mira mi última captura de pantalla."), nil, { savedShot = true })
+	elseif cmd == "pantalla" or cmd == "screen" then
+		local map = { auto = "auto", siempre = "always", always = "always", nunca = "never", never = "never" }
+		if map[rest] then s.screen = map[rest] end
+		local es = { auto = "auto", always = "siempre", never = "nunca" }
+		AddHistory(c, "system", L("Screenshots: " .. s.screen .. " (auto = when the message talks about the screen; always; never). The Shot button and /ai shot work in any mode.",
+			"Capturas: " .. es[s.screen] .. " (auto = cuando el mensaje habla de la pantalla; siempre; nunca). El botón Foto y /ai foto funcionan en cualquier modo."))
+		WoWAI.Render()
+		WoWAI.Toggle(true)
 	elseif cmd == "clear" then
 		wipe(c.history)
 		WoWAI.Render()
